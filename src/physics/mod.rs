@@ -79,3 +79,83 @@ pub struct TyreModel {
     /// mu breakaway friction is the friction that needs to be overcome to start moving the car
     mu_breakaway_friction: f64,
 }
+
+
+impl SimulationRunner {
+    /// Orchestrates the single-step lifecycle of the simulation frame.
+    /// Maps domain metrics to the underlying mathematical integrators.
+    pub fn step_lifecycle(&mut self) {
+        let dt = self.simulation_config.time_step;
+
+        // 1. Calculate new velocity from current acceleration
+        // Maps domain (velocity/acceleration) to generic math (integrators::euler)
+        self.current_state.velocity = integrators::euler(
+            self.current_state.velocity,
+            self.current_state.acceleration,
+            dt,
+        );
+
+        // 2. Calculate new displacement from the updated velocity
+        self.current_state.displacement = integrators::euler(
+            self.current_state.displacement,
+            self.current_state.velocity,
+            dt,
+        );
+
+        // 3. Advance global simulation clock
+        self.current_time += dt;
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physics::states::CarState;
+
+    #[test]
+    fn test_simulation_step_lifecycle() {
+        let tyres = TyreModel {
+            mu_static_friction: 1.2,
+            mu_rolling_friction: 0.02,
+            mu_breakaway_friction: 0.8,
+        };
+
+        let car = CarModel {
+            power: 745.0,
+            mass: 798.0,
+            max_torque: 950.0,
+            tyre_model: tyres,
+        };
+
+        let config = SimulationConfig {
+            initial_state: CarState {
+                velocity: 10.0,
+                acceleration: 5.0,
+                displacement: 0.0,
+                force: 100.0,
+            },
+            car_model: car,
+            start_time: 0.0,
+            end_time: 10.0,
+            start_displacement: 0.0,
+            start_velocity: 10.0,
+            start_acceleration: 5.0,
+            time_step: 0.1,
+        };
+
+        let mut runner = SimulationRunner {
+            current_state: config.initial_state.clone(),
+            simulation_config: config,
+            current_time: 0.0,
+        };
+
+        // Act: Run a single lifecycle tick
+        runner.step_lifecycle();
+
+        // Assert
+        assert!((runner.current_state.velocity - 10.5).abs() < 1e-6);
+        assert!((runner.current_state.displacement - 1.05).abs() < 1e-6);
+        assert!((runner.current_time - 0.1).abs() < 1e-6);
+    }
+}
