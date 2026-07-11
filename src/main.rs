@@ -1,4 +1,7 @@
 
+/// Physics module folder contains all the needed physics functions in modules: [physics::integrators].
+pub mod physics;
+
 
 pub fn calculate_twin_speed(acceleration: f64, t_start: f64, t_end: f64, t_step: f64, start_speed: f64) -> f64 {
     let mut speed = start_speed;
