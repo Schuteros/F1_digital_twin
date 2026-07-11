@@ -53,7 +53,7 @@ pub struct SimulationConfig {
 /// Contains all the variables that define the car needed to be simulated
 pub struct CarModel {
 
-    /// Power from the powertrain that is delivered to the wheels in kilowatts, kW
+    /// Power from the powertrain that is delivered to the wheels in Watts, W
     power: f64,
 
     /// Mass of the car in kilograms, kg
