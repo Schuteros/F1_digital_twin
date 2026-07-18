@@ -1,11 +1,12 @@
 use crate::physics::states::CarState;
 
-pub mod integrators;
-pub mod states;
-
+mod integrators;
+mod states;
+mod powertrain;
+mod forces;
 
 /// Holds all the values needed for the simulation
-pub struct SimulationRunner {
+pub(crate) struct SimulationRunner {
     simulation_config: SimulationConfig,
     current_state: CarState,
     current_time: f64, // Seconds (s)
@@ -14,7 +15,7 @@ pub struct SimulationRunner {
 
 
 /// Holds all the initial values to start simulation
-pub struct SimulationConfig {
+pub(crate) struct SimulationConfig {
 
     /// Initial state of the car at the start of the simulation
     initial_state: CarState,
@@ -51,7 +52,7 @@ pub struct SimulationConfig {
 
 
 /// Contains all the variables that define the car needed to be simulated
-pub struct CarModel {
+pub(crate) struct CarModel {
 
     /// Power from the powertrain that is delivered to the wheels in Watts, W
     power: f64,
@@ -68,7 +69,7 @@ pub struct CarModel {
 
 
 /// Model defines the tires used to simulate the car
-pub struct TyreModel {
+pub(crate) struct TyreModel {
 
     /// mu static friction which limits traction of the wheel
     mu_static_friction: f64,
