@@ -23,6 +23,7 @@ fn calculate_force_static_friction(normal_force: f64, mu_static_friction: f64) -
     force_static_friction
 }
 
+/// Calculates tire friction depending on the vehicle speed
 fn calculate_current_tire_friction(normal_force: f64, mu_rolling_friction: f64, mu_breakaway_friction: f64, speed: f64) -> f64 {
     if speed != 0.0 {
         let force = calculate_force_tyre_friction_rolling(normal_force, mu_rolling_friction);
