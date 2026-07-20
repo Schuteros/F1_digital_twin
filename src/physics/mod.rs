@@ -4,6 +4,7 @@ mod integrators;
 mod states;
 mod powertrain;
 mod forces;
+mod tires;
 
 /// Holds all the values needed for the simulation
 pub(crate) struct SimulationRunner {
