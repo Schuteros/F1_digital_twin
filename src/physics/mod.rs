@@ -5,6 +5,7 @@ mod states;
 mod powertrain;
 mod forces;
 mod tires;
+mod aero;
 
 /// Holds all the values needed for the simulation
 pub(crate) struct SimulationRunner {
@@ -89,23 +90,7 @@ impl SimulationRunner {
     pub fn step_lifecycle(&mut self) {
         let dt = self.simulation_config.time_step;
 
-        // 1. Calculate new velocity from current acceleration
-        // Maps domain (velocity/acceleration) to generic math (integrators::euler)
-        self.current_state.velocity = integrators::euler(
-            self.current_state.velocity,
-            self.current_state.acceleration,
-            dt,
-        );
-
-        // 2. Calculate new displacement from the updated velocity
-        self.current_state.displacement = integrators::euler(
-            self.current_state.displacement,
-            self.current_state.velocity,
-            dt,
-        );
-
-        // 3. Advance global simulation clock
-        self.current_time += dt;
+        
     }
 }
 
