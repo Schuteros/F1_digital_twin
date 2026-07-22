@@ -25,6 +25,9 @@ pub(crate) struct SimulationConfig {
     /// Car model containing all the specs and assumptions of the car
     car_model: CarModel,
 
+    /// Contains the starting conditions of the environment
+    environment_model: EnvironmentModel,
+
     /// Start time of the simulation in seconds, s
     /// **Range:**
     /// * min: f64::MIN
@@ -52,21 +55,50 @@ pub(crate) struct SimulationConfig {
     time_step: f64,
 }
 
+pub(crate) struct EnvironmentModel {
+    air_density: f64,
+}
+
 
 /// Contains all the variables that define the car needed to be simulated
 pub(crate) struct CarModel {
+    /// Contains data about mass distribution
+    mass_distribution: MassDistribution,
 
-    /// Power from the powertrain that is delivered to the wheels in Watts, W
-    power: f64,
-
-    /// Mass of the car in kilograms, kg
-    mass: f64,
-
-    /// Maximum torque on the wheels delivered from the powertrain in Newton meters, Nm
-    max_torque: f64,
+    /// Defines the powertrain used to simulate the car
+    powertrain_model: PowertrainModel,
 
     /// Defines the tires used to simulate the car
     tyre_model: TyreModel,
+
+    /// Defines the aerodynamic model of the car
+    aero_model: AeroModel,
+}
+
+
+/// Contains all the info about the aerodynamics of the car
+pub(crate) struct AeroModel {
+    /// drag coefficient of the car
+    drag_coefficient: f64,
+
+    /// frontal area of the car
+    frontal_area: f64,
+}
+
+/// Contains mass distribution data
+pub(crate) struct MassDistribution {
+    total_mass: f64,
+    rear_axle_mass: f64,
+    front_axle_mass: f64,
+}
+
+
+/// Contains all the variables that define the powertrain
+pub(crate) struct PowertrainModel {
+    /// Power from the powertrain that is delivered to the wheels in Watts, W
+    power: f64,
+    /// Maximum torque on the wheels delivered from the powertrain in Newton meters, Nm
+    max_torque: f64,
 }
 
 
@@ -81,6 +113,9 @@ pub(crate) struct TyreModel {
 
     /// mu breakaway friction is the friction that needs to be overcome to start moving the car
     mu_breakaway_friction: f64,
+
+    /// wheel radius
+    wheel_radius: f64,
 }
 
 
@@ -90,8 +125,12 @@ impl SimulationRunner {
     pub fn step_lifecycle(&mut self) {
         let dt = self.simulation_config.time_step;
 
-        
     }
+}
+
+
+pub(crate) fn calculate_acceleration(force: f64, mass: f64) -> f64 {
+    force / mass
 }
 
 
@@ -102,17 +141,34 @@ mod tests {
 
     #[test]
     fn test_simulation_step_lifecycle() {
-        let tyres = TyreModel {
+        let tyre_model = TyreModel {
             mu_static_friction: 1.2,
             mu_rolling_friction: 0.02,
             mu_breakaway_friction: 0.8,
+            wheel_radius: 0.36
+        };
+
+        let mass_distribution = MassDistribution {
+            total_mass: 1200.0,
+            rear_axle_mass: 600.0,
+            front_axle_mass: 600.0,
+        };
+
+        let powertrain_model = PowertrainModel {
+            power: 750_000.0,
+            max_torque: 650.0,
+        };
+
+        let aero_model = AeroModel {
+            drag_coefficient: 0.35,
+            frontal_area: 1.6,
         };
 
         let car = CarModel {
-            power: 745.0,
-            mass: 798.0,
-            max_torque: 950.0,
-            tyre_model: tyres,
+            mass_distribution,
+            powertrain_model,
+            tyre_model,
+            aero_model,
         };
 
         let config = SimulationConfig {
@@ -121,6 +177,9 @@ mod tests {
                 acceleration: 5.0,
                 displacement: 0.0,
                 force: 100.0,
+            },
+            environment_model: EnvironmentModel {
+                air_density: 1.225,
             },
             car_model: car,
             start_time: 0.0,
