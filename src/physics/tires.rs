@@ -2,31 +2,31 @@
 
 
 /// Calculates rolling friction force from tires knowing tire model
-pub(crate) fn calculate_force_tyre_friction_rolling(normal_force: f64, mu_rolling_friction: f64) -> f64 {
-    normal_force * mu_rolling_friction
+pub(crate) fn calculate_force_tyre_friction_rolling(total_normal_force: f64, mu_rolling_friction: f64) -> f64 {
+    total_normal_force * mu_rolling_friction
 }
 
 /// Calculates breakaway friction force from tires knowing tire model
-fn calculate_force_tyre_friction_breakaway(normal_force: f64, mu_breakaway_friction: f64) -> f64 {
-    normal_force * mu_breakaway_friction
+fn calculate_force_tyre_friction_breakaway(total_normal_force: f64, mu_breakaway_friction: f64) -> f64 {
+    total_normal_force * mu_breakaway_friction
 }
 
 /// Calculates tire static friction which correlates to accessible traction limit
-pub(crate) fn calculate_force_static_friction(normal_force: f64, mu_static_friction: f64) -> f64 {
-    normal_force * mu_static_friction
+pub(crate) fn calculate_force_static_friction(axle_normal_force: f64, mu_static_friction: f64) -> f64 {
+    axle_normal_force * mu_static_friction
 }
 
 /// Calculates tire friction depending on the vehicle speed
 pub(crate) fn calculate_current_tire_friction(
-    normal_force: f64,
+    total_normal_force: f64,
     mu_rolling_friction: f64,
     mu_breakaway_friction: f64,
     speed: f64,
 ) -> f64 {
     if speed != 0.0 {
-        calculate_force_tyre_friction_rolling(normal_force, mu_rolling_friction)
+        calculate_force_tyre_friction_rolling(total_normal_force, mu_rolling_friction)
     } else {
-        calculate_force_tyre_friction_breakaway(normal_force, mu_breakaway_friction)
+        calculate_force_tyre_friction_breakaway(total_normal_force, mu_breakaway_friction)
     }
 }
 

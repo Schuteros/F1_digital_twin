@@ -1,3 +1,4 @@
+use crate::physics::forces::calculate_net_force;
 use crate::physics::states::CarState;
 
 mod integrators;
@@ -57,6 +58,7 @@ pub(crate) struct SimulationConfig {
 
 pub(crate) struct EnvironmentModel {
     air_density: f64,
+    g_acceleration: f64,
 }
 
 
@@ -124,7 +126,9 @@ impl SimulationRunner {
     /// Maps domain metrics to the underlying mathematical integrators.
     pub fn step_lifecycle(&mut self) {
         let dt = self.simulation_config.time_step;
-
+        let car_model = &self.simulation_config.car_model;
+        //let normal_force = calculate
+        //let net_force = calculate_net_force()
     }
 }
 
@@ -173,13 +177,12 @@ mod tests {
 
         let config = SimulationConfig {
             initial_state: CarState {
-                velocity: 10.0,
-                acceleration: 5.0,
-                displacement: 0.0,
-                force: 100.0,
+                speed: 10.0,
+                distance: 0.0,
             },
             environment_model: EnvironmentModel {
                 air_density: 1.225,
+                g_acceleration: 9.81,
             },
             car_model: car,
             start_time: 0.0,
@@ -200,8 +203,8 @@ mod tests {
         runner.step_lifecycle();
 
         // Assert
-        assert!((runner.current_state.velocity - 10.5).abs() < 1e-6);
-        assert!((runner.current_state.displacement - 1.05).abs() < 1e-6);
+        assert!((runner.current_state.speed - 10.5).abs() < 1e-6);
+        assert!((runner.current_state.distance - 1.05).abs() < 1e-6);
         assert!((runner.current_time - 0.1).abs() < 1e-6);
     }
 }
