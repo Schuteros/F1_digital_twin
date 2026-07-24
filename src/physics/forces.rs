@@ -80,10 +80,15 @@ pub fn calculate_net_force(
 }
 
 
+pub(crate) fn calculate_acceleration(force: f64, mass: f64) -> f64 {
+    force / mass
+}
+
+
 #[cfg(test)]
 mod tests {
     use crate::physics::{AeroModel, EnvironmentModel, PowertrainModel, TyreModel};
-    use crate::physics::forces::{calculate_force_losses, calculate_net_force, calculate_normal_force, calculate_powertrain_force_tire_traction_limited};
+    use crate::physics::forces::{calculate_acceleration, calculate_force_losses, calculate_net_force, calculate_normal_force, calculate_powertrain_force_tire_traction_limited};
     use crate::physics::states::CarState;
 
     #[test]
@@ -204,5 +209,17 @@ mod tests {
         // Using previous values calculated:
         // Net force = 2285.714286 - 282.875 = 2002.839286 N
         assert!((net_force - 2002.839286).abs() < 1e-3);
+    }
+
+
+    #[test]
+    fn test_calculate_acceleration() {
+        let mass: f64 = 1000.0;
+        let force: f64 = 1000.0;
+
+        let acceleration = calculate_acceleration(force, mass);
+
+        // expected value: acceleration = 1000 / 1000 = 1 m/s^2
+        assert!((acceleration - 1.0).abs() < 1e-3);
     }
 }
