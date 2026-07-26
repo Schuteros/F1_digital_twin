@@ -10,11 +10,9 @@ mod aero;
 mod simulation;
 
 /// Holds all the values needed for the simulation
-pub(crate) struct SimulationRunner {
+pub(crate) struct SimulationState {
     current_state: CarState,
-    simulation_config: SimulationConfig,
     current_time: f64, // Seconds (s)
-
 }
 
 
