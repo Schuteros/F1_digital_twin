@@ -1,4 +1,3 @@
-use crate::physics::forces::calculate_net_force;
 use crate::physics::states::CarState;
 
 mod integrators;
@@ -111,10 +110,56 @@ pub(crate) struct TyreModel {
 }
 
 
+impl Default for EnvironmentModel {
+    fn default() -> Self {
+        Self {
+            air_density: 1.225,
+            g_acceleration: 9.81,
+        }
+    }
+}
+
+impl Default for TyreModel {
+    fn default() -> Self {
+        Self {
+            mu_static_friction: 0.9,
+            mu_rolling_friction: 0.03,
+            mu_breakaway_friction: 0.7,
+            wheel_radius: 0.35,
+        }
+    }
+}
+
+impl Default for AeroModel {
+    fn default() -> Self {
+        Self {
+            drag_coefficient: 0.35,
+            frontal_area: 2.0,
+        }
+    }
+}
+
+impl Default for PowertrainModel {
+    fn default() -> Self {
+        Self {
+            power: 800_000.0,
+            max_torque: 800.0,
+        }
+    }
+}
+
+impl Default for CarState {
+    fn default() -> Self {
+        Self {
+            speed: 0.0,
+            distance: 0.0,
+        }
+    }
+}
+
+
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::physics::states::CarState;
 
 }

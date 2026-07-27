@@ -70,7 +70,7 @@ fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &S
 mod tests {
     use crate::physics::states::CarState;
     use crate::physics::{AeroModel, CarModel, EnvironmentModel, MassDistribution, PowertrainModel, SimulationConfig, SimulationState, TyreModel};
-    use crate::physics::simulation::{get_vehicle_acceleration, get_vehicle_distance, get_vehicle_speed};
+    use crate::physics::simulation::{get_vehicle_acceleration, get_vehicle_distance, get_vehicle_speed, simulation_step};
 
 
     #[test]
@@ -266,5 +266,72 @@ mod tests {
         // From previous test results:
         // Expected value: distance = 100 + 10.0024559817 * 0.001 = 100.010002456
         assert!((distance - 100.010002456).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_simulation_step() {
+        let total_mass: f64 = 8000.0 / 9.81;
+        let driven_axle_mass: f64 = 4000.0 / 9.81;
+
+        let tyre_model = TyreModel {
+            mu_static_friction: 0.9,
+            mu_rolling_friction: 0.03,
+            mu_breakaway_friction: 0.7,
+            wheel_radius: 0.35,
+        };
+
+        let car_state = CarState {
+            speed: 10.0,
+            distance: 100.0,
+        };
+
+        let environment_model = EnvironmentModel {
+            air_density: 1.225,
+            g_acceleration: 9.81,
+        };
+
+        let aero_model = AeroModel {
+            drag_coefficient: 0.35,
+            frontal_area: 2.0,
+        };
+
+        let powertrain_model = PowertrainModel {
+            power: 800_000.0,
+            max_torque: 800.0,
+        };
+
+        let simulation_config = SimulationConfig {
+            initial_state: car_state,
+            car_model: CarModel {
+                mass_distribution: MassDistribution {
+                    total_mass,
+                    rear_axle_mass: driven_axle_mass,
+                    front_axle_mass: total_mass - driven_axle_mass,
+                },
+                powertrain_model,
+                tyre_model,
+                aero_model,
+            },
+            environment_model,
+            start_time: 0.0,
+            end_time: 1.0,
+            time_step: 0.001,
+        };
+
+
+
+        let mut simulation_state = SimulationState {
+            current_state: CarState::clone(&simulation_config.initial_state),
+            current_time: 0.0,
+        };
+
+        simulation_step(&mut simulation_state, &simulation_config);
+
+
+        // Expected value from previous results: speed = 10.0024559817
+        assert!((simulation_state.current_state.speed - 10.0024559817).abs() < 1e-4, "Speed didn't update correctly");
+
+        // Expected value from previous results: distance = 100.010002456
+        assert!((simulation_state.current_state.distance - 100.010002456).abs() < 1e-4, "Distance didn't update correctly");
     }
 }
