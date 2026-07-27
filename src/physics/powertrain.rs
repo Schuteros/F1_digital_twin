@@ -1,7 +1,7 @@
 //! This module contains calculations related to powertrain
 //!
 //! Underlying science equation are found in this documentation:
-//! [Powertrain Engine Documentation](../../docs/2_Powertrain_Force_Dynamics.MD)
+//! [Powertrain Engine Documentation](../../docs/02_Powertrain_Force_Dynamics.MD)
 
 
 /// Calculates force from powertrain that is limited by the power

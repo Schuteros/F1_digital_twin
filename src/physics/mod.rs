@@ -6,17 +6,17 @@ mod powertrain;
 mod forces;
 mod tires;
 mod aero;
-mod simulation;
+pub(crate) mod simulation;
 
 /// Holds all the values needed for the simulation
 pub(crate) struct SimulationState {
-    current_state: CarState,
-    current_time: f64, // Seconds (s)
+    pub(crate) current_state: CarState,
+    pub(crate) current_time: f64, // Seconds (s)
 }
 
 
 /// Holds all the initial values to start simulation
-pub(crate) struct SimulationConfig {
+pub struct SimulationConfig {
 
     /// Initial state of the car at the start of the simulation
     initial_state: CarState,
@@ -151,8 +151,50 @@ impl Default for PowertrainModel {
 impl Default for CarState {
     fn default() -> Self {
         Self {
-            speed: 0.0,
-            distance: 0.0,
+            speed: 10.0,
+            distance: 100.0,
+        }
+    }
+
+}
+
+impl Default for CarModel {
+    fn default() -> Self {
+        let total_mass = 8000.0 / 9.81;
+        let driven_axle_mass = 4000.0 / 9.81;
+
+        Self {
+            mass_distribution: MassDistribution {
+                total_mass,
+                rear_axle_mass: driven_axle_mass,
+                front_axle_mass: total_mass - driven_axle_mass,
+            },
+            powertrain_model: PowertrainModel::default(),
+            tyre_model: TyreModel::default(),
+            aero_model: AeroModel::default(),
+        }
+    }
+}
+
+impl Default for SimulationConfig {
+    fn default() -> Self {
+        Self {
+            initial_state: CarState::default(),
+            car_model: CarModel::default(),
+            environment_model: EnvironmentModel::default(),
+            start_time: 0.0,
+            end_time: 1.0,
+            time_step: 0.001,
+        }
+    }
+}
+
+
+impl SimulationState {
+    pub fn new(config: &SimulationConfig) -> Self {
+        Self {
+            current_state: config.initial_state.clone(),
+            current_time: config.start_time,
         }
     }
 }

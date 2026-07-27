@@ -2,7 +2,7 @@ use crate::physics::aero::calculate_air_drag;
 use crate::physics::powertrain::calculate_force_from_powertrain;
 use crate::physics::tires::{calculate_current_tire_friction, calculate_force_static_friction};
 use crate::physics::states::CarState;
-use crate::physics::{AeroModel, EnvironmentModel, MassDistribution, PowertrainModel, TyreModel};
+use crate::physics::{AeroModel, EnvironmentModel, PowertrainModel, TyreModel};
 
 fn calculate_powertrain_force_tire_traction_limited(
     driven_axle_normal_force: f64,
@@ -130,27 +130,13 @@ mod tests {
     fn test_calculate_force_losses() {
         let total_normal_force: f64 = 8000.0;
 
-        let tyre_model = TyreModel {
-            mu_static_friction: 0.9,
-            mu_rolling_friction: 0.03,
-            mu_breakaway_friction: 0.7,
-            wheel_radius: 0.35,
-        };
+        let tyre_model = TyreModel::default();
 
-        let car_state = CarState {
-            speed: 10.0,
-            distance: 100.0,
-        };
+        let car_state = CarState::default();
 
-        let environment_model = EnvironmentModel {
-            air_density: 1.225,
-            g_acceleration: 9.81,
-        };
+        let environment_model = EnvironmentModel::default();
 
-        let aero_model = AeroModel {
-            drag_coefficient: 0.35,
-            frontal_area: 2.0,
-        };
+        let aero_model = AeroModel::default();
 
 
         let force_losses = calculate_force_losses(total_normal_force, &tyre_model, &car_state, &environment_model, &aero_model);
@@ -177,32 +163,15 @@ mod tests {
         let total_mass: f64 = 8000.0 / 9.81;
         let driven_axle_mass: f64 = 4000.0 / 9.81;
 
-        let tyre_model = TyreModel {
-            mu_static_friction: 0.9,
-            mu_rolling_friction: 0.03,
-            mu_breakaway_friction: 0.7,
-            wheel_radius: 0.35,
-        };
+        let tyre_model = TyreModel::default();
 
-        let car_state = CarState {
-            speed: 10.0,
-            distance: 100.0,
-        };
+        let car_state = CarState::default();
 
-        let environment_model = EnvironmentModel {
-            air_density: 1.225,
-            g_acceleration: 9.81,
-        };
+        let environment_model = EnvironmentModel::default();
 
-        let aero_model = AeroModel {
-            drag_coefficient: 0.35,
-            frontal_area: 2.0,
-        };
+        let aero_model = AeroModel::default();
 
-        let powertrain_model = PowertrainModel {
-            power: 800_000.0,
-            max_torque: 800.0,
-        };
+        let powertrain_model = PowertrainModel::default();
 
         let net_force = calculate_net_force(total_mass, driven_axle_mass, &car_state, &powertrain_model, &tyre_model, &environment_model, &aero_model);
 

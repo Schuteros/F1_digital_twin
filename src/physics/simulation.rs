@@ -1,4 +1,4 @@
-use crate::physics::{CarModel, EnvironmentModel, SimulationConfig, SimulationState};
+pub(crate) use crate::physics::{CarModel, EnvironmentModel, SimulationConfig, SimulationState};
 use crate::physics::forces::{calculate_acceleration, calculate_net_force};
 use crate::physics::integrators::euler;
 use crate::physics::states::CarState;
@@ -62,66 +62,51 @@ fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &S
     simulation_state.current_time += simulation_config.time_step;
 }
 
+/// Function to start simulation and iterates trough simulation steps
+pub fn start_simulation(
+    simulation_config: &SimulationConfig,
+    telemetry: bool,
+    verbose: bool,
+) -> SimulationState {
+    let mut simulation_state = SimulationState::new(simulation_config);
 
+    if verbose {
+        println!(
+            "Start: Speed {:.2} m/s | Distance {:.2} m",
+            simulation_state.current_state.speed,
+            simulation_state.current_state.distance
+        );
+    }
 
+    while simulation_state.current_time < simulation_config.end_time {
+        if telemetry {
+            // Telemetry recording logic here
+        }
+
+        simulation_step(&mut simulation_state, simulation_config);
+    }
+
+    if verbose {
+        println!(
+            "Final: Speed {:.2} m/s | Distance {:.2} m",
+            simulation_state.current_state.speed,
+            simulation_state.current_state.distance
+        );
+    }
+
+    simulation_state
+}
 
 
 #[cfg(test)]
 mod tests {
-    use crate::physics::states::CarState;
-    use crate::physics::{AeroModel, CarModel, EnvironmentModel, MassDistribution, PowertrainModel, SimulationConfig, SimulationState, TyreModel};
+    use crate::physics::{SimulationConfig, SimulationState};
     use crate::physics::simulation::{get_vehicle_acceleration, get_vehicle_distance, get_vehicle_speed, simulation_step};
 
 
     #[test]
     fn test_get_vehicle_acceleration() {
-        let total_mass: f64 = 8000.0 / 9.81;
-        let driven_axle_mass: f64 = 4000.0 / 9.81;
-
-        let tyre_model = TyreModel {
-            mu_static_friction: 0.9,
-            mu_rolling_friction: 0.03,
-            mu_breakaway_friction: 0.7,
-            wheel_radius: 0.35,
-        };
-
-        let car_state = CarState {
-            speed: 10.0,
-            distance: 100.0,
-        };
-
-        let environment_model = EnvironmentModel {
-            air_density: 1.225,
-            g_acceleration: 9.81,
-        };
-
-        let aero_model = AeroModel {
-            drag_coefficient: 0.35,
-            frontal_area: 2.0,
-        };
-
-        let powertrain_model = PowertrainModel {
-            power: 800_000.0,
-            max_torque: 800.0,
-        };
-
-        let simulation_config = SimulationConfig {
-            initial_state: car_state,
-            car_model: CarModel {
-                mass_distribution: MassDistribution {
-                    total_mass,
-                    rear_axle_mass: driven_axle_mass,
-                    front_axle_mass: total_mass - driven_axle_mass,
-                },
-                powertrain_model,
-                tyre_model,
-                aero_model,
-            },
-            environment_model,
-            start_time: 0.0,
-            end_time: 1.0,
-            time_step: 0.001,
-        };
+        let simulation_config = SimulationConfig::default();
 
 
         let acceleration = get_vehicle_acceleration(&simulation_config.car_model, &simulation_config.initial_state, &simulation_config.environment_model);
@@ -133,60 +118,9 @@ mod tests {
 
     #[test]
     fn test_get_vehicle_speed() {
-        let total_mass: f64 = 8000.0 / 9.81;
-        let driven_axle_mass: f64 = 4000.0 / 9.81;
+        let simulation_config = SimulationConfig::default();
 
-        let tyre_model = TyreModel {
-            mu_static_friction: 0.9,
-            mu_rolling_friction: 0.03,
-            mu_breakaway_friction: 0.7,
-            wheel_radius: 0.35,
-        };
-
-        let car_state = CarState {
-            speed: 10.0,
-            distance: 100.0,
-        };
-
-        let environment_model = EnvironmentModel {
-            air_density: 1.225,
-            g_acceleration: 9.81,
-        };
-
-        let aero_model = AeroModel {
-            drag_coefficient: 0.35,
-            frontal_area: 2.0,
-        };
-
-        let powertrain_model = PowertrainModel {
-            power: 800_000.0,
-            max_torque: 800.0,
-        };
-
-        let simulation_config = SimulationConfig {
-            initial_state: car_state,
-            car_model: CarModel {
-                mass_distribution: MassDistribution {
-                    total_mass,
-                    rear_axle_mass: driven_axle_mass,
-                    front_axle_mass: total_mass - driven_axle_mass,
-                },
-                powertrain_model,
-                tyre_model,
-                aero_model,
-            },
-            environment_model,
-            start_time: 0.0,
-            end_time: 1.0,
-            time_step: 0.001,
-        };
-
-
-
-        let simulation_state = SimulationState {
-            current_state: CarState::clone(&simulation_config.initial_state),
-            current_time: 0.0
-        };
+        let simulation_state = SimulationState::new(&simulation_config);
 
         let speed = get_vehicle_speed(&simulation_config.car_model,
                                       &simulation_state.current_state,
@@ -201,65 +135,14 @@ mod tests {
 
     #[test]
     fn test_get_vehicle_distance() {
-        let total_mass: f64 = 8000.0 / 9.81;
-        let driven_axle_mass: f64 = 4000.0 / 9.81;
+        let simulation_config = SimulationConfig::default();
 
-        let tyre_model = TyreModel {
-            mu_static_friction: 0.9,
-            mu_rolling_friction: 0.03,
-            mu_breakaway_friction: 0.7,
-            wheel_radius: 0.35,
-        };
-
-        let car_state = CarState {
-            speed: 10.0,
-            distance: 100.0,
-        };
-
-        let environment_model = EnvironmentModel {
-            air_density: 1.225,
-            g_acceleration: 9.81,
-        };
-
-        let aero_model = AeroModel {
-            drag_coefficient: 0.35,
-            frontal_area: 2.0,
-        };
-
-        let powertrain_model = PowertrainModel {
-            power: 800_000.0,
-            max_torque: 800.0,
-        };
-
-        let simulation_config = SimulationConfig {
-            initial_state: car_state,
-            car_model: CarModel {
-                mass_distribution: MassDistribution {
-                    total_mass,
-                    rear_axle_mass: driven_axle_mass,
-                    front_axle_mass: total_mass - driven_axle_mass,
-                },
-                powertrain_model,
-                tyre_model,
-                aero_model,
-            },
-            environment_model,
-            start_time: 0.0,
-            end_time: 1.0,
-            time_step: 0.001,
-        };
-
-
-
-        let simulation_sate = SimulationState {
-            current_state: CarState::clone(&simulation_config.initial_state),
-            current_time: 0.0,
-        };
+        let simulation_state = SimulationState::new(&simulation_config);
 
         let speed = 10.0024559817;
 
         let distance = get_vehicle_distance(
-        &simulation_sate.current_state,
+        &simulation_state.current_state,
         &simulation_config,
         speed);
 
@@ -270,60 +153,9 @@ mod tests {
 
     #[test]
     fn test_simulation_step() {
-        let total_mass: f64 = 8000.0 / 9.81;
-        let driven_axle_mass: f64 = 4000.0 / 9.81;
+        let simulation_config = SimulationConfig::default();
 
-        let tyre_model = TyreModel {
-            mu_static_friction: 0.9,
-            mu_rolling_friction: 0.03,
-            mu_breakaway_friction: 0.7,
-            wheel_radius: 0.35,
-        };
-
-        let car_state = CarState {
-            speed: 10.0,
-            distance: 100.0,
-        };
-
-        let environment_model = EnvironmentModel {
-            air_density: 1.225,
-            g_acceleration: 9.81,
-        };
-
-        let aero_model = AeroModel {
-            drag_coefficient: 0.35,
-            frontal_area: 2.0,
-        };
-
-        let powertrain_model = PowertrainModel {
-            power: 800_000.0,
-            max_torque: 800.0,
-        };
-
-        let simulation_config = SimulationConfig {
-            initial_state: car_state,
-            car_model: CarModel {
-                mass_distribution: MassDistribution {
-                    total_mass,
-                    rear_axle_mass: driven_axle_mass,
-                    front_axle_mass: total_mass - driven_axle_mass,
-                },
-                powertrain_model,
-                tyre_model,
-                aero_model,
-            },
-            environment_model,
-            start_time: 0.0,
-            end_time: 1.0,
-            time_step: 0.001,
-        };
-
-
-
-        let mut simulation_state = SimulationState {
-            current_state: CarState::clone(&simulation_config.initial_state),
-            current_time: 0.0,
-        };
+        let mut simulation_state = SimulationState::new(&simulation_config);
 
         simulation_step(&mut simulation_state, &simulation_config);
 
