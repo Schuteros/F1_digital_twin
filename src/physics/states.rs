@@ -1,5 +1,7 @@
-#[derive(Debug, Clone)]
-pub(crate) struct CarState {
-    pub(crate) speed: f64,
-    pub(crate) distance: f64
+#[derive(Debug, Clone, Copy)]
+pub struct CarState {
+    pub speed: f64,
+    pub distance: f64,
+    pub current_gear: u8,
+    pub current_revs: f64,
 }

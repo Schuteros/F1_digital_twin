@@ -1,12 +1,12 @@
 use crate::physics::states::CarState;
 
-mod integrators;
-mod states;
-mod powertrain;
-mod forces;
-mod tires;
 mod aero;
+mod forces;
+mod integrators;
+mod powertrain;
 pub(crate) mod simulation;
+mod states;
+mod tires;
 
 /// Holds all the values needed for the simulation
 pub(crate) struct SimulationState {
@@ -14,101 +14,105 @@ pub(crate) struct SimulationState {
     pub(crate) current_time: f64, // Seconds (s)
 }
 
-
 /// Holds all the initial values to start simulation
 pub struct SimulationConfig {
-
     /// Initial state of the car at the start of the simulation
-    initial_state: CarState,
+    pub initial_state: CarState,
 
     /// Car model containing all the specs and assumptions of the car
-    car_model: CarModel,
+    pub car_model: CarModel,
 
     /// Contains the starting conditions of the environment
-    environment_model: EnvironmentModel,
+    pub environment_model: EnvironmentModel,
 
     /// Start time of the simulation in seconds, s
     /// **Range:**
     /// * min: f64::MIN
     /// * max: <end_time
-    start_time: f64, // Seconds (s)
+    pub start_time: f64, // Seconds (s)
 
     /// End time of the simulation in seconds, s
     /// **Range:**
     /// * min: >start_time
     /// * max: f64::MAX
-    end_time: f64, // Seconds (s)
+    pub end_time: f64, // Seconds (s)
 
     /// Time step of the simulation in seconds, s
     /// * Smaller value increases accuracy of the simulation, but increases computation time linearly
     /// * Larger value decreases computation time linearly, but at cost of reduced accuracy of the simulation
-    time_step: f64,
+    pub time_step: f64,
 }
 
-pub(crate) struct EnvironmentModel {
-    air_density: f64,
-    g_acceleration: f64,
+pub struct EnvironmentModel {
+    pub air_density: f64,
+    pub g_acceleration: f64,
 }
-
 
 /// Contains all the variables that define the car needed to be simulated
-pub(crate) struct CarModel {
+pub struct CarModel {
     /// Contains data about mass distribution
-    mass_distribution: MassDistribution,
+    pub mass_distribution: MassDistribution,
 
     /// Defines the powertrain used to simulate the car
-    powertrain_model: PowertrainModel,
+    pub powertrain_model: PowertrainModel,
 
     /// Defines the tires used to simulate the car
-    tyre_model: TyreModel,
+    pub tyre_model: TyreModel,
 
     /// Defines the aerodynamic model of the car
-    aero_model: AeroModel,
+    pub aero_model: AeroModel,
 }
 
-
 /// Contains all the info about the aerodynamics of the car
-pub(crate) struct AeroModel {
+pub struct AeroModel {
     /// drag coefficient of the car
-    drag_coefficient: f64,
+    pub drag_coefficient: f64,
 
     /// frontal area of the car
-    frontal_area: f64,
+    pub frontal_area: f64,
 }
 
 /// Contains mass distribution data
-pub(crate) struct MassDistribution {
-    total_mass: f64,
-    rear_axle_mass: f64,
-    front_axle_mass: f64,
+pub struct MassDistribution {
+    pub total_mass: f64,
+    pub rear_axle_mass: f64,
+    pub front_axle_mass: f64,
 }
-
 
 /// Contains all the variables that define the powertrain
-pub(crate) struct PowertrainModel {
+pub struct PowertrainModel {
     /// Power from the powertrain that is delivered to the wheels in Watts, W
-    power: f64,
+    pub power: f64,
     /// Maximum torque on the wheels delivered from the powertrain in Newton meters, Nm
-    max_torque: f64,
+    pub max_torque: f64,
+    /// Max rotational speed of the engine in Hertz, Hz
+    pub max_revs: f64,
+    /// Min rotational speed of the engine in Hertz, Hz
+    pub min_revs: f64,
+    /// Gear ratios from largest to smallest
+    pub gear_ratios: Vec<f64>,
+    /// Final drive ratio
+    pub final_drive: f64,
+    /// Shift up margin in Hertz, Hz
+    pub shift_up_margin: f64,
+    /// Shift down margin in Hertz, Hz
+    pub shift_down_margin: f64,
 }
-
 
 /// Model defines the tires used to simulate the car
-pub(crate) struct TyreModel {
-
+pub struct TyreModel {
     /// mu static friction which limits traction of the wheel
-    mu_static_friction: f64,
+    pub mu_static_friction: f64,
 
     /// mu rolling friction is the friction opposite to the movement that tries to stop the car
-    mu_rolling_friction: f64,
+    pub mu_rolling_friction: f64,
 
     /// mu breakaway friction is the friction that needs to be overcome to start moving the car
-    mu_breakaway_friction: f64,
+    pub mu_breakaway_friction: f64,
 
     /// wheel radius
-    wheel_radius: f64,
+    pub wheel_radius: f64,
 }
-
 
 impl Default for EnvironmentModel {
     fn default() -> Self {
@@ -125,7 +129,7 @@ impl Default for TyreModel {
             mu_static_friction: 0.9,
             mu_rolling_friction: 0.03,
             mu_breakaway_friction: 0.7,
-            wheel_radius: 0.35,
+            wheel_radius: 0.36,
         }
     }
 }
@@ -144,6 +148,12 @@ impl Default for PowertrainModel {
         Self {
             power: 800_000.0,
             max_torque: 800.0,
+            max_revs: 133.33,
+            min_revs: 13.33,
+            gear_ratios: vec![3.0, 2.0, 1.0, 0.8, 0.5],
+            final_drive: 1.5,
+            shift_up_margin: 0.5,
+            shift_down_margin: 0.5,
         }
     }
 }
@@ -153,9 +163,10 @@ impl Default for CarState {
         Self {
             speed: 10.0,
             distance: 100.0,
+            current_gear: 1,
+            current_revs: 0.5,
         }
     }
-
 }
 
 impl Default for CarModel {
@@ -189,7 +200,6 @@ impl Default for SimulationConfig {
     }
 }
 
-
 impl SimulationState {
     pub fn new(config: &SimulationConfig) -> Self {
         Self {
@@ -199,9 +209,5 @@ impl SimulationState {
     }
 }
 
-
-
 #[cfg(test)]
-mod tests {
-
-}
+mod tests {}

@@ -1,8 +1,12 @@
 //! Functions related to the aerodynamic forces
 
-
 /// Calculates air drag
-pub(crate) fn calculate_air_drag(air_density: f64, drag_coefficient: f64, frontal_area: f64, speed: f64) -> f64 {
+pub(crate) fn calculate_air_drag(
+    air_density: f64,
+    drag_coefficient: f64,
+    frontal_area: f64,
+    speed: f64,
+) -> f64 {
     0.5 * air_density * drag_coefficient * frontal_area * speed * speed.abs() // Newtons (N)
 }
 
@@ -23,6 +27,4 @@ mod tests {
         // Expected air drag: 0.5 * 1.225 * 0.35 * 2 * 33^2 * (+1) = 466.90875 Newtons (N)
         assert!((air_drag - 466.90875).abs() < 1e-3, "Incorrect air drag");
     }
-
-
 }

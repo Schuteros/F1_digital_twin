@@ -9,7 +9,6 @@ pub(crate) fn euler(current_value: f64, derivative: f64, dt: f64) -> f64 {
     current_value + (derivative * dt)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -18,6 +17,9 @@ mod tests {
     fn test_pure_euler_integration() {
         // Test a standalone calculus step: y = 10.0, dy/dt = 5.0, dt = 0.1
         let result = euler(10.0, 5.0, 0.1);
-        assert!((result - 10.5).abs() < 1e-6, "Math engine failed basic integration!");
+        assert!(
+            (result - 10.5).abs() < 1e-6,
+            "Math engine failed basic integration!"
+        );
     }
 }
