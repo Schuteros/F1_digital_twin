@@ -7,6 +7,7 @@ mod powertrain;
 pub(crate) mod simulation;
 mod states;
 mod tires;
+pub mod track;
 
 /// Holds all the values needed for the simulation
 pub(crate) struct SimulationState {
