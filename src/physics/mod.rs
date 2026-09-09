@@ -8,6 +8,7 @@ pub(crate) mod simulation;
 mod states;
 mod tires;
 pub mod track;
+pub mod braking;
 
 /// Holds all the values needed for the simulation
 pub(crate) struct SimulationState {
@@ -172,8 +173,8 @@ impl Default for CarState {
 
 impl Default for CarModel {
     fn default() -> Self {
-        let total_mass = 8000.0 / 9.81;
-        let driven_axle_mass = 4000.0 / 9.81;
+        let total_mass = 815.494393476;
+        let driven_axle_mass = 407.747196738;
 
         Self {
             mass_distribution: MassDistribution {
