@@ -1,6 +1,6 @@
 # F1 Digital Twin Simulator For Design Validation
 
-Physics simulation of a Formula 1 car in progress. Current versions 0.1.0.
+Physics simulation of a Formula 1 car in progress. In reality, it is not limited to just F1 cars, but any type of car with 4 wheels. Current versions 0.1.0.
 
 ---
 
@@ -48,6 +48,7 @@ Every cycle works like this:
 8. Add physics module chassis.rs at physics folder
 9. Write simple model for car pitch and roll
 10. Add tests for car pitch and roll
+11. Convert codebase to a crate library and publish it at crates.io
 
 ---
 
