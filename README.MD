@@ -38,15 +38,14 @@ Every cycle works like this:
 
 ## 3. Engineering Backlog & TODOs
 
-1. Test car braking module
-2. Integrate braking force in simulation step
-3. Test braking force integration in simulation step
-4. Add docs file about physics of roll and pitch of a vehicle
-5. Add physics module chassis.rs at physics folder
-6. Write simple model for car pitch and roll
-7. Add tests for car pitch and roll
-8. Convert codebase to a crate library and publish it at crates.io
-9. Move structs from physics/mod.rs to modules related to the struct in /physics
+1. Integrate braking force in simulation step
+2. Test braking force integration in simulation step
+3. Add docs file about physics of roll and pitch of a vehicle
+4. Add physics module chassis.rs at physics folder
+5. Write simple model for car pitch and roll
+6. Add tests for car pitch and roll
+7. Convert codebase to a crate library and publish it at crates.io
+8. Move structs from physics/mod.rs to modules related to the struct in /physics
 
 ---
 

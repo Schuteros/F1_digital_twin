@@ -167,6 +167,7 @@ impl Default for CarState {
             distance: 100.0,
             current_gear: 1,
             current_revs: 0.5,
+            active_braking_zone: 0,
         }
     }
 }
