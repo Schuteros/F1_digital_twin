@@ -1,6 +1,8 @@
 use crate::physics::states::CarState;
+use crate::physics::track::Track;
 
 mod aero;
+pub mod braking;
 mod forces;
 mod integrators;
 mod powertrain;
@@ -8,7 +10,6 @@ pub(crate) mod simulation;
 mod states;
 mod tires;
 pub mod track;
-pub mod braking;
 
 /// Holds all the values needed for the simulation
 pub(crate) struct SimulationState {
@@ -26,6 +27,9 @@ pub struct SimulationConfig {
 
     /// Contains the starting conditions of the environment
     pub environment_model: EnvironmentModel,
+
+    /// Contains the track configuration
+    pub track: Track,
 
     /// Start time of the simulation in seconds, s
     /// **Range:**
@@ -160,18 +164,6 @@ impl Default for PowertrainModel {
     }
 }
 
-impl Default for CarState {
-    fn default() -> Self {
-        Self {
-            speed: 10.0,
-            distance: 100.0,
-            current_gear: 1,
-            current_revs: 0.5,
-            active_braking_zone: 0,
-        }
-    }
-}
-
 impl Default for CarModel {
     fn default() -> Self {
         let total_mass = 815.494393476;
@@ -196,6 +188,7 @@ impl Default for SimulationConfig {
             initial_state: CarState::default(),
             car_model: CarModel::default(),
             environment_model: EnvironmentModel::default(),
+            track: Track::default(),
             start_time: 0.0,
             end_time: 1.0,
             time_step: 0.001,
