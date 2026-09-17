@@ -278,4 +278,30 @@ mod tests {
             speed_slower = speed_faster;
         }
     }
+
+    #[test]
+    fn test_straight_line_braking() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.track.braking_zones = vec![(0.0, 500.0)];
+
+        let mut simulation_state = SimulationState::new(&simulation_config);
+
+        let mut last_speed = simulation_state.current_state.speed;
+
+        for _ in 0..10 {
+            simulation_step(& mut simulation_state, &simulation_config );
+            assert!(last_speed > simulation_state.current_state.speed);
+            last_speed = simulation_state.current_state.speed;
+        }
+    }
+
+    #[test]
+    fn test_straight_line_stopping() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.track.braking_zones = vec![(0.0, 1000.0)];
+        simulation_config.end_time = 10.0;
+
+        let end_state = start_simulation(&simulation_config, false, false);
+        assert_eq!(end_state.current_state.speed, 0.0);
+    }
 }
