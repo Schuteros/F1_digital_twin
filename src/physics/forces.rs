@@ -74,12 +74,6 @@ pub fn calculate_net_force(
         environment_model.g_acceleration,
     );
 
-    let powertrain_force = calculate_powertrain_force_tire_traction_limited(
-        driven_axle_normal_force,
-        car_state,
-        powertrain_model,
-        tyre_model,
-    );
     let force_losses = calculate_force_losses(
         total_normal_force,
         tyre_model,
@@ -89,7 +83,21 @@ pub fn calculate_net_force(
         mass_distribution,
     );
 
-    powertrain_force - force_losses
+    if car_state.braking {
+        if car_state.speed == 0.0 {
+            0.0
+        } else {
+            -force_losses
+        }
+    } else {
+        let powertrain_force = calculate_powertrain_force_tire_traction_limited(
+            driven_axle_normal_force,
+            car_state,
+            powertrain_model,
+            tyre_model,
+        );
+        powertrain_force - force_losses
+    }
 }
 
 pub(crate) fn calculate_acceleration(force: f64, mass: f64) -> f64 {
@@ -202,5 +210,24 @@ mod tests {
 
         // expected value: acceleration = 1000 / 1000 = 1 m/s^2
         assert!((acceleration - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn straight_line_breaking() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.initial_state.braking = true;
+
+        let net_force = calculate_net_force(
+            &simulation_config.car_model.mass_distribution,
+            simulation_config.car_model.mass_distribution.rear_axle_mass,
+            &simulation_config.initial_state,
+            &simulation_config.car_model.powertrain_model,
+            &simulation_config.car_model.tyre_model,
+            &simulation_config.environment_model,
+            &simulation_config.car_model.aero_model,
+        );
+
+        // From previous calculations: net force = -282.875 - 7200 = -7482.875 N
+        assert!((net_force - (-7482.875)).abs() < 1e-4);
     }
 }

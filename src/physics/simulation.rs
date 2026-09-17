@@ -78,12 +78,17 @@ fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &S
         simulation_state.current_state.current_revs,
         simulation_state.current_state.current_gear,
     );
+
     simulation_state.current_state.speed = get_vehicle_speed(
         &simulation_config.car_model,
         &simulation_state.current_state,
         &simulation_config.environment_model,
         &simulation_config,
     );
+
+    if simulation_state.current_state.speed <= 0.0 && simulation_state.current_state.braking {
+        simulation_state.current_state.speed = 0.0;
+    }
 
     simulation_state.current_state.distance = get_vehicle_distance(
         &simulation_state.current_state,
