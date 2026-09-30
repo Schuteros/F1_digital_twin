@@ -54,6 +54,24 @@ fn is_car_stopped(car_state: &CarState) -> bool {
     car_state.braking && car_state.speed == 0.0
 }
 
+/// Calculates how many time steps are needed to reach end_time from start_time
+fn calculate_total_steps(simulation_config: &SimulationConfig) -> u64 {
+    let span = simulation_config.end_time - simulation_config.start_time;
+    if span <= 0.0 || simulation_config.time_step <= 0.0 {
+        return 0;
+    }
+
+    let steps = span / simulation_config.time_step;
+    let rounded = steps.round();
+
+    // Treat values within floating point noise of a whole number as that whole number
+    if (steps - rounded).abs() < 1e-9 * rounded.max(1.0) {
+        rounded as u64
+    } else {
+        steps.ceil() as u64
+    }
+}
+
 /// Simulation step updates simulation runner
 fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &SimulationConfig) {
     simulation_state.current_state.active_braking_zone = find_active_braking_zone(
@@ -114,14 +132,20 @@ pub fn start_simulation(
         );
     }
 
-    while simulation_state.current_time < simulation_config.end_time
-        && !is_car_stopped(&simulation_state.current_state)
-    {
+    // Step count is computed up front: accumulating `current_time += time_step` drifts in
+    // floating point and can run one extra step (e.g. 5.0 s / 0.004 s gives 1251 steps, not 1250).
+    let total_steps = calculate_total_steps(simulation_config);
+    let mut step: u64 = 0;
+
+    while step < total_steps && !is_car_stopped(&simulation_state.current_state) {
         if telemetry {
             // Telemetry recording logic here
         }
 
         simulation_step(&mut simulation_state, simulation_config);
+        step += 1;
+        simulation_state.current_time =
+            simulation_config.start_time + step as f64 * simulation_config.time_step;
     }
 
     if verbose {
@@ -137,8 +161,8 @@ pub fn start_simulation(
 #[cfg(test)]
 mod tests {
     use crate::physics::simulation::{
-        get_vehicle_acceleration, get_vehicle_distance, get_vehicle_speed, simulation_step,
-        start_simulation,
+        calculate_total_steps, get_vehicle_acceleration, get_vehicle_distance, get_vehicle_speed,
+        simulation_step, start_simulation,
     };
     use crate::physics::{SimulationConfig, SimulationState};
 
@@ -303,5 +327,24 @@ mod tests {
 
         let end_state = start_simulation(&simulation_config, false, false);
         assert_eq!(end_state.current_state.speed, 0.0);
+    }
+
+    #[test]
+    fn test_calculate_total_steps() {
+        let mut simulation_config = SimulationConfig::default();
+
+        simulation_config.end_time = 5.0;
+        simulation_config.time_step = 0.1 / 25.0;
+        // Accumulating 0.004 s in a loop gives 1251 steps, expected exactly 5.0 / 0.004 = 1250
+        assert_eq!(calculate_total_steps(&simulation_config), 1250);
+
+        simulation_config.end_time = 1.0;
+        simulation_config.time_step = 1.5;
+        // Partial last step is still executed: ceil(1.0 / 1.5) = 1
+        assert_eq!(calculate_total_steps(&simulation_config), 1);
+
+        simulation_config.time_step = 0.0;
+        // Invalid time step must not loop forever
+        assert_eq!(calculate_total_steps(&simulation_config), 0);
     }
 }
