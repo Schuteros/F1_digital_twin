@@ -19,10 +19,10 @@ fn main() {
 
     // 3. Inspect the final output
     println!("\nSimulation Complete!");
-    println!("Final Time    : {:.3} s", final_state.current_time);
-    println!("Final Speed   : {:.2} m/s", final_state.current_state.speed);
+    println!("Final Time    : {:.3} s", final_state.time);
+    println!("Final Speed   : {:.2} m/s", final_state.car.speed);
     println!(
         "Final Distance: {:.2} m",
-        final_state.current_state.distance
+        final_state.car.distance
     );
 }

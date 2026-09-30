@@ -24,10 +24,10 @@ Every cycle (`simulation_step`) executes in this order:
 2. **Powertrain State Update:** Recalculate input engine revs (`calculate_transmission_input_revs`) and select optimal gear (`select_best_gear`).
 3. **Net Force Evaluation (`calculate_net_force`):**
     * **If Braking:** Sum all resistive losses (rolling friction + air drag + brake force). If car speed is 0 m/s, net force is set to 0 N; otherwise net force equals `-force_losses`.
-    * **If Accelerating:** Calculate powertrain force (minimum of torque limit and power limit), limit by tire static friction limit (`calculate_force_static_friction`), and subtract rolling friction and air drag losses.
+    * **If Accelerating:** Calculate powertrain force (minimum of torque limit and power limit), limit by tyre static friction limit (`calculate_force_static_friction`), and subtract rolling friction and air drag losses.
 4. **Acceleration:** Calculate vehicle acceleration by dividing net force by total mass (`calculate_acceleration`).
-5. **Speed Integration:** Integrate acceleration via Euler step (`get_vehicle_speed`). If the car drops to or below 0 m/s while braking, clamp speed to 0.0 m/s.
-6. **Distance Integration:** Integrate updated speed via Euler step to advance position on the track (`get_vehicle_distance`).
+5. **Speed Integration:** Integrate acceleration via Euler step (`get_car_speed`). If the car drops to or below 0 m/s while braking, clamp speed to 0.0 m/s.
+6. **Distance Integration:** Integrate updated speed via Euler step to advance position on the track (`get_car_distance`).
 7. **Time Step Advancement:** Increment total simulation runtime by `time_step`.
 
 ---

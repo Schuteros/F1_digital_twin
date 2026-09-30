@@ -1,8 +1,8 @@
-# 3. Tire Friction and Traction
+# 3. Tyre Friction and Traction
 
-The force from the powertrain is transferred directly to the tires, where contact 
+The force from the powertrain is transferred directly to the tyres, where contact 
 with the track surface generates the longitudinal force that accelerates the vehicle. 
-Consequently, the vehicle's ultimate performance is governed by tire limits. The tires 
+Consequently, the vehicle's ultimate performance is governed by tyre limits. The tyres 
 also generate parasitic friction forces that oppose motion and must be overcome to 
 accelerate.
 
@@ -10,9 +10,9 @@ accelerate.
 
 ## 3.1. Static Friction and Traction
 
-The tires cannot transmit a force greater than their traction limit. If this limit is 
-exceeded, the wheels spin out, causing a loss of controlled acceleration.Tire traction 
-is determined by the normal force acting on the tires and the static friction coefficient,
+The tyres cannot transmit a force greater than their traction limit. If this limit is 
+exceeded, the wheels spin out, causing a loss of controlled acceleration.Tyre traction 
+is determined by the normal force acting on the tyres and the static friction coefficient,
 $\mu_{\text{static}}$. This coefficient dictates how much larger the maximum 
 static friction force (traction capacity) is relative to the normal force. 
 This relationship is expressed as:
@@ -26,10 +26,10 @@ where:
 
 ---
 
-## 3.2. Tire breakaway friction
+## 3.2. Tyre breakaway friction
 
 To initiate vehicle motion from a complete standstill, an initial threshold resistance 
-must be overcome. This is defined as the tire breakaway friction. Once the vehicle 
+must be overcome. This is defined as the tyre breakaway friction. Once the vehicle 
 begins to move, this transient threshold drops away, and continuous rolling resistance 
 takes over. The equation for breakaway friction is:
 
@@ -42,9 +42,9 @@ where:
 
 ---
 
-## 3.3. Tire rolling friction
+## 3.3. Tyre rolling friction
 
-Once the vehicle is in motion, the tires experience a continuous resistance force that 
+Once the vehicle is in motion, the tyres experience a continuous resistance force that 
 opposes the direction of travel. In this MVP framework, we implement the classic rolling 
 friction model:
 
@@ -59,9 +59,9 @@ where:
 
 [!WARNING]
 The equations defined in this module represent a simplified, idealized friction model 
-suitable for a baseline Minimum Viable Product (MVP). They assume rigid tire-road 
+suitable for a baseline Minimum Viable Product (MVP). They assume rigid tyre-road 
 interfaces and instantaneous friction transitions. In high-fidelity engineering simulators,
-tire dynamics are highly non-linear and depend heavily on structural deformation, 
+tyre dynamics are highly non-linear and depend heavily on structural deformation, 
 vertical load sensitivity, temperature, and slip ratios. Real-world vehicle dynamics 
 software typically replaces these linear models with empirical or semi-empirical 
 equations, most notably Pacejka's Magic Formula.The Pacejka model computes longitudinal 
@@ -69,7 +69,7 @@ force $F_x$ as a non-linear function of longitudinal slip
 
 $\kappa$:$$F_x = D \cdot \sin\left(C \cdot \arctan\left(B \cdot \kappa - E \cdot (B \cdot \kappa - \arctan(B \cdot \kappa))\right)\right) \tag{3.4}$$
 
-where $B, C, D,$ and $E$ are empirical coefficients derived from physical tire testing. 
+where $B, C, D,$ and $E$ are empirical coefficients derived from physical tyre testing. 
 While our current architecture utilizes the simplified static/rolling friction threshold 
 equations for performance baseline testing, the forces module is designed modularly to 
 allow dropping in a Pacejka-style slip model in future development phases.

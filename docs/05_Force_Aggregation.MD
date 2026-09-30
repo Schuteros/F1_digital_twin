@@ -1,7 +1,7 @@
 # 5. Longitudinal Force Aggregation Loop
 
 Every simulation timestep, the aggregation module resolves the net longitudinal force acting on the vehicle chassis. 
-This loop combines the tractive limits of the powertrain, tire friction transitions, and environmental resistances into 
+This loop combines the tractive limits of the powertrain, tyre friction transitions, and environmental resistances into 
 a single acceleration vector.
 
 ---
@@ -10,8 +10,8 @@ a single acceleration vector.
 
 The net force calculation follows a precise, sequential architecture during each state update:
 
-### 1. Evaluate Tire Traction Limit
-The maximum force the tires can physically transmit to the track surface is governed by the normal force currently acting 
+### 1. Evaluate Tyre Traction Limit
+The maximum force the tyres can physically transmit to the track surface is governed by the normal force currently acting 
 on the driven wheels ($N_{\text{driven}}$):
 
 $$F_{\text{traction\_max}} = N_{\text{driven}} \cdot \mu_{\text{static}} \tag{5.1}$$
@@ -19,12 +19,12 @@ $$F_{\text{traction\_max}} = N_{\text{driven}} \cdot \mu_{\text{static}} \tag{5.
 ### 2. Evaluate Powertrain Delivery & Cap
 The powertrain computes the ideal force output by checking if the engine is torque-limited or power-limited 
 (utilizing hardware-native IEEE 754 float division at zero speed). This ideal force is then immediately capped by the physical
-tire traction limit:
+tyre traction limit:
 
 $$F_{\text{propulsion}} = \min\left(\min\left(\frac{T_{\text{max}}}{R}, \frac{P}{v}\right), F_{\text{traction\_max}}\right) \tag{5.2}$$
 
 ### 3. Evaluate Parasitic Resistance Losses
-The environment and tire interfaces exert forces that actively reduce the total forward force. The loop calculates 
+The environment and tyre interfaces exert forces that actively reduce the total forward force. The loop calculates 
 these resistances based on the current vehicle velocity:
 
 * **Standstill Threshold ($v = 0$):** The vehicle must overcome the transient breakaway force to initiate motion:

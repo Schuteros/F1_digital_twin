@@ -1,7 +1,7 @@
 /// Struct that holds information about the track on which the car is tested
 pub struct Track {
     /// Track length in meters, m
-    pub track_length: f64, // m
+    pub length: f64, // m
     /// Braking zone starts and ends in meters, m
     pub braking_zones: Vec<(f64, f64)>, // start-end in meters, m
 }
@@ -9,7 +9,7 @@ pub struct Track {
 impl Default for Track {
     fn default() -> Self {
         Self {
-            track_length: 1000.0,
+            length: 1000.0,
             braking_zones: vec![(900.0, 1000.0)],
         }
     }
@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn test_is_braking_zone() {
         let track = Track {
-            track_length: 1000.0,                                                // m
+            length: 1000.0,                                                // m
             braking_zones: vec![(200.0, 300.0), (300.0, 400.0), (450.0, 500.0)], // [(m, m)],
         };
 

@@ -3,43 +3,43 @@ use crate::physics::integrators::euler;
 use crate::physics::powertrain::{calculate_transmission_input_revs, select_best_gear};
 use crate::physics::states::CarState;
 use crate::physics::track::{find_active_braking_zone, is_braking_zone};
-pub(crate) use crate::physics::{CarModel, EnvironmentModel, SimulationConfig, SimulationState};
+pub(crate) use crate::physics::{Car, Environment, SimulationConfig, SimulationState};
 
-/// Calculates vehicle acceleration given the current car model, state, and environment.
-pub fn get_vehicle_acceleration(
-    car_model: &CarModel,
+/// Calculates car acceleration given the current car model, state, and environment.
+pub fn get_car_acceleration(
+    car: &Car,
     car_state: &CarState,
-    environment_model: &EnvironmentModel,
+    environment: &Environment,
 ) -> f64 {
     let force = calculate_net_force(
-        &car_model.mass_distribution,
-        car_model.mass_distribution.rear_axle_mass, // or driven axle mass
+        &car.mass,
+        car.mass.rear, // or driven axle mass
         car_state,
-        &car_model.powertrain_model,
-        &car_model.tyre_model,
-        environment_model,
-        &car_model.aero_model,
+        &car.powertrain,
+        &car.tyre,
+        environment,
+        &car.aero,
     );
 
-    calculate_acceleration(force, car_model.mass_distribution.total_mass)
+    calculate_acceleration(force, car.mass.total)
 }
 
-/// Calculates vehicle speed given the current car model, state, environment model and simulation_config.
-fn get_vehicle_speed(
-    car_model: &CarModel,
+/// Calculates car speed given the current car model, state, environment model and simulation_config.
+fn get_car_speed(
+    car: &Car,
     car_state: &CarState,
-    environment_model: &EnvironmentModel,
+    environment: &Environment,
     simulation_config: &SimulationConfig,
 ) -> f64 {
-    let acceleration = get_vehicle_acceleration(car_model, car_state, environment_model);
+    let acceleration = get_car_acceleration(car, car_state, environment);
 
     let speed = euler(car_state.speed, acceleration, simulation_config.time_step);
 
     speed
 }
 
-/// Calculates vehicle distance given the current car model, state, environment model and simulation_config.
-fn get_vehicle_distance(
+/// Calculates car distance given the current car model, state, environment model and simulation_config.
+fn get_car_distance(
     car_state: &CarState,
     simulation_config: &SimulationConfig,
     speed: f64,
@@ -74,47 +74,47 @@ fn calculate_total_steps(simulation_config: &SimulationConfig) -> u64 {
 
 /// Simulation step updates simulation runner
 fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &SimulationConfig) {
-    simulation_state.current_state.active_braking_zone = find_active_braking_zone(
-        simulation_state.current_state.distance,
+    simulation_state.car.active_braking_zone = find_active_braking_zone(
+        simulation_state.car.distance,
         &simulation_config.track.braking_zones,
-        simulation_state.current_state.active_braking_zone,
+        simulation_state.car.active_braking_zone,
     );
 
-    simulation_state.current_state.braking = is_braking_zone(
+    simulation_state.car.braking = is_braking_zone(
         &simulation_config.track.braking_zones,
-        simulation_state.current_state.distance,
-        simulation_state.current_state.active_braking_zone,
+        simulation_state.car.distance,
+        simulation_state.car.active_braking_zone,
     );
 
-    simulation_state.current_state.current_revs = calculate_transmission_input_revs(
-        &simulation_config.car_model.powertrain_model,
-        simulation_config.car_model.tyre_model.wheel_radius,
-        &simulation_state.current_state,
+    simulation_state.car.revs_hz = calculate_transmission_input_revs(
+        &simulation_config.car.powertrain,
+        simulation_config.car.tyre.wheel_radius,
+        &simulation_state.car,
     );
-    simulation_state.current_state.current_gear = select_best_gear(
-        &simulation_config.car_model.powertrain_model,
-        simulation_state.current_state.current_revs,
-        simulation_state.current_state.current_gear,
+    simulation_state.car.gear = select_best_gear(
+        &simulation_config.car.powertrain,
+        simulation_state.car.revs_hz,
+        simulation_state.car.gear,
     );
 
-    simulation_state.current_state.speed = get_vehicle_speed(
-        &simulation_config.car_model,
-        &simulation_state.current_state,
-        &simulation_config.environment_model,
+    simulation_state.car.speed = get_car_speed(
+        &simulation_config.car,
+        &simulation_state.car,
+        &simulation_config.environment,
         &simulation_config,
     );
 
-    if simulation_state.current_state.speed <= 0.0 && simulation_state.current_state.braking {
-        simulation_state.current_state.speed = 0.0;
+    if simulation_state.car.speed <= 0.0 && simulation_state.car.braking {
+        simulation_state.car.speed = 0.0;
     }
 
-    simulation_state.current_state.distance = get_vehicle_distance(
-        &simulation_state.current_state,
+    simulation_state.car.distance = get_car_distance(
+        &simulation_state.car,
         &simulation_config,
-        simulation_state.current_state.speed,
+        simulation_state.car.speed,
     );
 
-    simulation_state.current_time += simulation_config.time_step;
+    simulation_state.time += simulation_config.time_step;
 }
 
 /// Function to start simulation and iterates trough simulation steps
@@ -128,30 +128,30 @@ pub fn start_simulation(
     if verbose {
         println!(
             "Speed {:.2} m/s | Distance {:.2} m",
-            simulation_state.current_state.speed, simulation_state.current_state.distance
+            simulation_state.car.speed, simulation_state.car.distance
         );
     }
 
-    // Step count is computed up front: accumulating `current_time += time_step` drifts in
+    // Step count is computed up front: accumulating `time += time_step` drifts in
     // floating point and can run one extra step (e.g. 5.0 s / 0.004 s gives 1251 steps, not 1250).
     let total_steps = calculate_total_steps(simulation_config);
     let mut step: u64 = 0;
 
-    while step < total_steps && !is_car_stopped(&simulation_state.current_state) {
+    while step < total_steps && !is_car_stopped(&simulation_state.car) {
         if telemetry {
             // Telemetry recording logic here
         }
 
         simulation_step(&mut simulation_state, simulation_config);
         step += 1;
-        simulation_state.current_time =
+        simulation_state.time =
             simulation_config.start_time + step as f64 * simulation_config.time_step;
     }
 
     if verbose {
         println!(
             "Final: Speed {:.2} m/s | Distance {:.2} m",
-            simulation_state.current_state.speed, simulation_state.current_state.distance
+            simulation_state.car.speed, simulation_state.car.distance
         );
     }
 
@@ -161,20 +161,20 @@ pub fn start_simulation(
 #[cfg(test)]
 mod tests {
     use crate::physics::simulation::{
-        calculate_total_steps, get_vehicle_acceleration, get_vehicle_distance, get_vehicle_speed,
+        calculate_total_steps, get_car_acceleration, get_car_distance, get_car_speed,
         simulation_step, start_simulation,
     };
     use crate::physics::{SimulationConfig, SimulationState};
 
     #[test]
-    fn test_get_vehicle_acceleration() {
+    fn test_get_car_acceleration() {
         let mut simulation_config = SimulationConfig::default();
 
-        simulation_config.initial_state.current_gear = 4;
-        let acceleration = get_vehicle_acceleration(
-            &simulation_config.car_model,
-            &simulation_config.initial_state,
-            &simulation_config.environment_model,
+        simulation_config.initial_car.gear = 4;
+        let acceleration = get_car_acceleration(
+            &simulation_config.car,
+            &simulation_config.initial_car,
+            &simulation_config.environment,
         );
 
         // from forces.rs and knowing total mass expected value:
@@ -187,16 +187,16 @@ mod tests {
     }
 
     #[test]
-    fn test_get_vehicle_speed() {
+    fn test_get_car_speed() {
         let simulation_config = SimulationConfig::default();
 
         let mut simulation_state = SimulationState::new(&simulation_config);
-        simulation_state.current_state.current_gear = 4;
+        simulation_state.car.gear = 4;
 
-        let speed = get_vehicle_speed(
-            &simulation_config.car_model,
-            &simulation_state.current_state,
-            &simulation_config.environment_model,
+        let speed = get_car_speed(
+            &simulation_config.car,
+            &simulation_state.car,
+            &simulation_config.environment,
             &simulation_config,
         );
 
@@ -210,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_vehicle_distance() {
+    fn test_get_car_distance() {
         let simulation_config = SimulationConfig::default();
 
         let simulation_state = SimulationState::new(&simulation_config);
@@ -218,7 +218,7 @@ mod tests {
         let speed = 10.0029231246;
 
         let distance =
-            get_vehicle_distance(&simulation_state.current_state, &simulation_config, speed);
+            get_car_distance(&simulation_state.car, &simulation_config, speed);
 
         // From previous test results:
         // Expected value: distance = 100 + 10.0029231246 * 0.001 = 100.010002923
@@ -230,20 +230,20 @@ mod tests {
         let simulation_config = SimulationConfig::default();
 
         let mut simulation_state = SimulationState::new(&simulation_config);
-        simulation_state.current_state.current_gear = 4;
+        simulation_state.car.gear = 4;
 
         simulation_step(&mut simulation_state, &simulation_config);
 
         // Expected value from the calculated results with correct gear: speed = 10.00374062453125
         assert!(
-            (simulation_state.current_state.speed - 10.00374062453125).abs() < 1e-4,
+            (simulation_state.car.speed - 10.00374062453125).abs() < 1e-4,
             "Speed didn't update correctly, expected: calculated: {}",
-            simulation_state.current_state.speed
+            simulation_state.car.speed
         );
 
         // Expected value from previous results: distance = 100 + 10.00374062453125 * 0.001 =
         assert!(
-            (simulation_state.current_state.distance - 100.010003741).abs() < 1e-4,
+            (simulation_state.car.distance - 100.010003741).abs() < 1e-4,
             "Distance didn't update correctly"
         );
     }
@@ -255,14 +255,14 @@ mod tests {
         simulation_config.time_step = 0.1; // Start at 0.1s (50 steps) instead of 1.0s (5 steps)
 
         let mut dist_a = start_simulation(&simulation_config, false, false)
-            .current_state
+            .car
             .distance;
         let mut prev_diff = f64::MAX;
 
         for _ in 0..5 {
             simulation_config.time_step /= 5.0;
             let dist_b = start_simulation(&simulation_config, false, false)
-                .current_state
+                .car
                 .distance;
 
             let current_diff = (dist_a - dist_b).abs();
@@ -289,14 +289,14 @@ mod tests {
         simulation_config.end_time = 1.0;
 
         let mut speed_slower = start_simulation(&simulation_config, false, false)
-            .current_state
+            .car
             .speed;
         let mut speed_faster: f64;
 
         for _ in 0..10 {
             simulation_config.time_step += 0.5;
             speed_faster = start_simulation(&simulation_config, false, false)
-                .current_state
+                .car
                 .speed;
             assert!(speed_faster > speed_slower, "Speed didn't increase!");
             speed_slower = speed_faster;
@@ -310,12 +310,12 @@ mod tests {
 
         let mut simulation_state = SimulationState::new(&simulation_config);
 
-        let mut last_speed = simulation_state.current_state.speed;
+        let mut last_speed = simulation_state.car.speed;
 
         for _ in 0..10 {
             simulation_step(& mut simulation_state, &simulation_config );
-            assert!(last_speed > simulation_state.current_state.speed);
-            last_speed = simulation_state.current_state.speed;
+            assert!(last_speed > simulation_state.car.speed);
+            last_speed = simulation_state.car.speed;
         }
     }
 
@@ -326,7 +326,7 @@ mod tests {
         simulation_config.end_time = 10.0;
 
         let end_state = start_simulation(&simulation_config, false, false);
-        assert_eq!(end_state.current_state.speed, 0.0);
+        assert_eq!(end_state.car.speed, 0.0);
     }
 
     #[test]

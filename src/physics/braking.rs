@@ -1,34 +1,34 @@
-use crate::physics::MassDistribution;
+use crate::physics::Mass;
 use crate::physics::forces::calculate_normal_force;
 
 pub(crate) fn calculate_brake_force(
-    mass_distribution: &MassDistribution,
-    mu_static_friction: f64,
+    mass: &Mass,
+    mu_static: f64,
     g_acceleration: f64,
 ) -> f64 {
     let front_axle_normal_force =
-        calculate_normal_force(mass_distribution.front_axle_mass, g_acceleration);
+        calculate_normal_force(mass.front, g_acceleration);
     let rear_axle_normal_force =
-        calculate_normal_force(mass_distribution.rear_axle_mass, g_acceleration);
+        calculate_normal_force(mass.rear, g_acceleration);
 
-    front_axle_normal_force * mu_static_friction + rear_axle_normal_force * mu_static_friction
+    front_axle_normal_force * mu_static + rear_axle_normal_force * mu_static
 }
 
 #[cfg(test)]
 mod tests {
     use crate::physics::braking::calculate_brake_force;
-    use crate::physics::{CarModel, EnvironmentModel, TyreModel};
+    use crate::physics::{Car, Environment, Tyre};
 
     #[test]
     fn test_calculate_brake_force() {
-        let car_model = CarModel::default();
-        let tyre_model = TyreModel::default();
-        let environment_model = EnvironmentModel::default();
+        let car = Car::default();
+        let tyre = Tyre::default();
+        let environment = Environment::default();
 
         let brake_force = calculate_brake_force(
-            &car_model.mass_distribution,
-            tyre_model.mu_static_friction,
-            environment_model.g_acceleration,
+            &car.mass,
+            tyre.mu_static,
+            environment.g_acceleration,
         );
 
         // brake force = 407.747196738 * 9.81 * 0.9 + 407.747196738 * 9.81 * 0.9 = 7200 N
