@@ -96,7 +96,16 @@ pub fn calculate_net_force(
             powertrain_model,
             tyre_model,
         );
-        powertrain_force - force_losses
+
+        let net_force = powertrain_force - force_losses;
+
+        // At standstill, breakaway friction can only resist motion, never push the car backwards.
+        // While moving, a negative net force is real deceleration (e.g. drag above terminal speed).
+        if car_state.speed == 0.0 && net_force < 0.0 {
+            0.0
+        } else {
+            net_force
+        }
     }
 }
 
@@ -229,5 +238,52 @@ mod tests {
 
         // From previous calculations: net force = -282.875 - 7200 = -7482.875 N
         assert!((net_force - (-7482.875)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_net_force_coasting_above_terminal_speed() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.initial_state.speed = 80.0;
+        simulation_config.initial_state.current_gear = 5;
+
+        let net_force = calculate_net_force(
+            &simulation_config.car_model.mass_distribution,
+            simulation_config.car_model.mass_distribution.rear_axle_mass,
+            &simulation_config.initial_state,
+            &simulation_config.car_model.powertrain_model,
+            &simulation_config.car_model.tyre_model,
+            &simulation_config.environment_model,
+            &simulation_config.car_model.aero_model,
+        );
+
+        // Powertrain force torque limited = 800 * 0.5 * 1.5 / 0.36 = 1666.6667 N
+        // Losses = 240 N + 0.5 * 1.225 * 0.35 * 2 * 80 * 80 = 240 + 2744 = 2984 N
+        // Net force = 1666.6667 - 2984 = -1317.3333 N (car must slow down)
+        assert!(
+            (net_force - (-1317.3333)).abs() < 1e-3,
+            "Expected value: -1317.3333, calculated value: {}",
+            net_force
+        );
+    }
+
+    #[test]
+    fn test_net_force_standstill_not_negative() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.initial_state.speed = 0.0;
+        simulation_config.initial_state.current_gear = 1;
+
+        let net_force = calculate_net_force(
+            &simulation_config.car_model.mass_distribution,
+            simulation_config.car_model.mass_distribution.rear_axle_mass,
+            &simulation_config.initial_state,
+            &simulation_config.car_model.powertrain_model,
+            &simulation_config.car_model.tyre_model,
+            &simulation_config.environment_model,
+            &simulation_config.car_model.aero_model,
+        );
+
+        // Traction limited force = 3600 N, breakaway friction = 8000 * 0.7 = 5600 N
+        // Breakaway friction can't push the car backwards, so expected value: 0 N
+        assert_eq!(net_force, 0.0);
     }
 }

@@ -32,11 +32,14 @@ pub(crate) fn is_braking_zone(
 pub(crate) fn find_active_braking_zone(
     distance: f64,
     braking_zones: &[(f64, f64)],
-    active_braking_zone: usize,
+    mut active_braking_zone: usize,
 ) -> usize {
-    if let Some(&(_, end)) = braking_zones.get(active_braking_zone) {
+    // Loop so that several zones passed within a single (large) time step are all skipped
+    while let Some(&(_, end)) = braking_zones.get(active_braking_zone) {
         if distance > end && active_braking_zone + 1 < braking_zones.len() {
-            return active_braking_zone + 1;
+            active_braking_zone += 1;
+        } else {
+            break;
         }
     }
     active_braking_zone
@@ -117,5 +120,16 @@ mod tests {
 
             distance += 50.0;
         }
+    }
+
+    #[test]
+    fn test_find_active_braking_zone_skips_multiple_zones() {
+        let braking_zones = [(10.0, 20.0), (30.0, 40.0), (50.0, 60.0), (70.0, 80.0)];
+
+        // Car jumped from 0 m to 55 m in one step, so it is now inside the 3rd zone
+        let active_braking_zone = find_active_braking_zone(55.0, &braking_zones, 0);
+
+        assert_eq!(active_braking_zone, 2);
+        assert!(is_braking_zone(&braking_zones, 55.0, active_braking_zone));
     }
 }
