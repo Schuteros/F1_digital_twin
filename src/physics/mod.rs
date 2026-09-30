@@ -8,25 +8,25 @@ mod integrators;
 mod powertrain;
 pub(crate) mod simulation;
 mod states;
-mod tires;
+mod tyres;
 pub mod track;
 
 /// Holds all the values needed for the simulation
 pub(crate) struct SimulationState {
-    pub(crate) current_state: CarState,
-    pub(crate) current_time: f64, // Seconds (s)
+    pub(crate) car: CarState,
+    pub(crate) time: f64, // Seconds (s)
 }
 
 /// Holds all the initial values to start simulation
 pub struct SimulationConfig {
     /// Initial state of the car at the start of the simulation
-    pub initial_state: CarState,
+    pub initial_car: CarState,
 
     /// Car model containing all the specs and assumptions of the car
-    pub car_model: CarModel,
+    pub car: Car,
 
     /// Contains the starting conditions of the environment
-    pub environment_model: EnvironmentModel,
+    pub environment: Environment,
 
     /// Contains the track configuration
     pub track: Track,
@@ -49,28 +49,28 @@ pub struct SimulationConfig {
     pub time_step: f64,
 }
 
-pub struct EnvironmentModel {
+pub struct Environment {
     pub air_density: f64,
     pub g_acceleration: f64,
 }
 
 /// Contains all the variables that define the car needed to be simulated
-pub struct CarModel {
+pub struct Car {
     /// Contains data about mass distribution
-    pub mass_distribution: MassDistribution,
+    pub mass: Mass,
 
     /// Defines the powertrain used to simulate the car
-    pub powertrain_model: PowertrainModel,
+    pub powertrain: Powertrain,
 
-    /// Defines the tires used to simulate the car
-    pub tyre_model: TyreModel,
+    /// Defines the tyres used to simulate the car
+    pub tyre: Tyre,
 
     /// Defines the aerodynamic model of the car
-    pub aero_model: AeroModel,
+    pub aero: Aero,
 }
 
 /// Contains all the info about the aerodynamics of the car
-pub struct AeroModel {
+pub struct Aero {
     /// drag coefficient of the car
     pub drag_coefficient: f64,
 
@@ -79,14 +79,17 @@ pub struct AeroModel {
 }
 
 /// Contains mass distribution data
-pub struct MassDistribution {
-    pub total_mass: f64,
-    pub rear_axle_mass: f64,
-    pub front_axle_mass: f64,
+pub struct Mass {
+    /// Total mass of the car in kilograms, kg
+    pub total: f64,
+    /// Mass on the rear axle in kilograms, kg
+    pub rear: f64,
+    /// Mass on the front axle in kilograms, kg
+    pub front: f64,
 }
 
 /// Contains all the variables that define the powertrain
-pub struct PowertrainModel {
+pub struct Powertrain {
     /// Power from the powertrain that is delivered to the wheels in Watts, W
     pub power: f64,
     /// Maximum torque on the wheels delivered from the powertrain in Newton meters, Nm
@@ -105,22 +108,22 @@ pub struct PowertrainModel {
     pub shift_down_margin: f64,
 }
 
-/// Model defines the tires used to simulate the car
-pub struct TyreModel {
+/// Model defines the tyres used to simulate the car
+pub struct Tyre {
     /// mu static friction which limits traction of the wheel
-    pub mu_static_friction: f64,
+    pub mu_static: f64,
 
     /// mu rolling friction is the friction opposite to the movement that tries to stop the car
-    pub mu_rolling_friction: f64,
+    pub mu_rolling: f64,
 
     /// mu breakaway friction is the friction that needs to be overcome to start moving the car
-    pub mu_breakaway_friction: f64,
+    pub mu_breakaway: f64,
 
     /// wheel radius
     pub wheel_radius: f64,
 }
 
-impl Default for EnvironmentModel {
+impl Default for Environment {
     fn default() -> Self {
         Self {
             air_density: 1.225,
@@ -129,18 +132,18 @@ impl Default for EnvironmentModel {
     }
 }
 
-impl Default for TyreModel {
+impl Default for Tyre {
     fn default() -> Self {
         Self {
-            mu_static_friction: 0.9,
-            mu_rolling_friction: 0.03,
-            mu_breakaway_friction: 0.7,
+            mu_static: 0.9,
+            mu_rolling: 0.03,
+            mu_breakaway: 0.7,
             wheel_radius: 0.36,
         }
     }
 }
 
-impl Default for AeroModel {
+impl Default for Aero {
     fn default() -> Self {
         Self {
             drag_coefficient: 0.35,
@@ -149,7 +152,7 @@ impl Default for AeroModel {
     }
 }
 
-impl Default for PowertrainModel {
+impl Default for Powertrain {
     fn default() -> Self {
         Self {
             power: 800_000.0,
@@ -164,20 +167,20 @@ impl Default for PowertrainModel {
     }
 }
 
-impl Default for CarModel {
+impl Default for Car {
     fn default() -> Self {
         let total_mass = 815.494393476;
         let driven_axle_mass = 407.747196738;
 
         Self {
-            mass_distribution: MassDistribution {
-                total_mass,
-                rear_axle_mass: driven_axle_mass,
-                front_axle_mass: total_mass - driven_axle_mass,
+            mass: Mass {
+                total: total_mass,
+                rear: driven_axle_mass,
+                front: total_mass - driven_axle_mass,
             },
-            powertrain_model: PowertrainModel::default(),
-            tyre_model: TyreModel::default(),
-            aero_model: AeroModel::default(),
+            powertrain: Powertrain::default(),
+            tyre: Tyre::default(),
+            aero: Aero::default(),
         }
     }
 }
@@ -185,9 +188,9 @@ impl Default for CarModel {
 impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
-            initial_state: CarState::default(),
-            car_model: CarModel::default(),
-            environment_model: EnvironmentModel::default(),
+            initial_car: CarState::default(),
+            car: Car::default(),
+            environment: Environment::default(),
             track: Track::default(),
             start_time: 0.0,
             end_time: 1.0,
@@ -199,8 +202,8 @@ impl Default for SimulationConfig {
 impl SimulationState {
     pub fn new(config: &SimulationConfig) -> Self {
         Self {
-            current_state: config.initial_state.clone(),
-            current_time: config.start_time,
+            car: config.initial_car.clone(),
+            time: config.start_time,
         }
     }
 }

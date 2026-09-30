@@ -41,11 +41,11 @@ where:
 * P is power in watts (W),
 * v is velocity in meters per second (m/s).
 
-For a force which is limited by max torque from powertrain, we have to look at the radius of the tires,
+For a force which is limited by max torque from powertrain, we have to look at the radius of the tyres,
 and we need to know also drivetrain gear ratio or look at the powertrain model as directly driven.
 
 If we look at the model as a directly driven system, then things are easier, force is transmitted
-by the tire lever arm which is given by the tire radius, if we consider tire as incompressible. 
+by the tyre lever arm which is given by the tyre radius, if we consider tyre as incompressible. 
 
 By knowing that the torque is defined as a product of the lever arm length perpendicular to the force
 and the force itself, then we can plug our known variables and substitute for force and get this equation:
@@ -55,7 +55,7 @@ $$F=\frac{T}{R},\tag{2.4.}$$
 where:
 * F is force in Newtons (N),
 * T is torque in Newton meters (Nm),
-* R is tire radius in meters (m).
+* R is tyre radius in meters (m).
 
 If we involve geartrain ratio i, then things are not complicated, as i works as torque multiplier, 
 soo the equation 2.4. resolves into this equation.
@@ -66,7 +66,7 @@ where:
 * F is force in Newtons (N),
 * T is torque before drivetrain in Newton meters (Nm),
 * i is drivetrain ratio,
-* R is tire radius in meters (m).
+* R is tyre radius in meters (m).
 
 Important thing to note is that the Force at low speeds (wheel rotates slowly) it is not power limited
 but torque limited. When the speed increases (wheel rotates quickly), then the force limited by torque
@@ -86,8 +86,8 @@ $$F_{\text{propulsion}} = \min\left(\frac{i \cdot T}{R}, \frac{P}{v}\right) \tag
 
 While this provides a highly functional baseline, this first-iteration model relies on 
 several key simplifications that deviate from a real Formula 1 car:
-* Incompressible Tire Radius ($R$): Equation (2.4) assumes the tire is a perfect, 
-rigid circle. In reality, F1 tires deform under downforce and high speeds, meaning the loaded 
+* Incompressible Tyre Radius ($R$): Equation (2.4) assumes the tyre is a perfect, 
+rigid circle. In reality, F1 tyres deform under downforce and high speeds, meaning the loaded 
 radius changes dynamically.
 * Instantaneous Peak Power: We assume the engine can deliver peak power ($P$) instantly at any 
 speed above the crossover point. A real internal combustion engine has a dynamic torque/RPM band 
