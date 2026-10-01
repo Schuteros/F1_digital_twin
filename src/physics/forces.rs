@@ -2,25 +2,33 @@ use crate::physics::aero::calculate_air_drag;
 use crate::physics::braking::calculate_brake_force;
 use crate::physics::car::Car;
 use crate::physics::environment::Environment;
-use crate::physics::loads::{AxleLoads, calculate_static_axle_loads};
+use crate::physics::loads::AxleLoads;
 use crate::physics::powertrain::{Powertrain, calculate_force_from_powertrain};
 use crate::physics::states::CarState;
-use crate::physics::tyres::{Tyre, calculate_current_tyre_friction, calculate_force_static_friction};
+use crate::physics::tyres::{Tyre, calculate_current_tyre_friction, calculate_split_force_limit};
 
+/// Calculates powertrain force in Newtons, N, limited by the grip of the driven axles.
+/// The powertrain force is split between the axles by the drivetrain, and the first
+/// driven axle to reach its traction limit caps the total (ideal traction control).
 fn calculate_powertrain_force_tyre_traction_limited(
-    driven_axle_normal_force: f64,
+    axle_loads: &AxleLoads,
     car_state: &CarState,
     powertrain: &Powertrain,
     tyre: &Tyre,
 ) -> f64 {
     let powertrain_force =
         calculate_force_from_powertrain(powertrain, tyre.wheel_radius, car_state);
-    let traction_force =
-        calculate_force_static_friction(driven_axle_normal_force, tyre.mu_static);
+    let traction_force = calculate_split_force_limit(
+        axle_loads,
+        tyre.mu_static,
+        powertrain.drivetrain.front_share(),
+    );
 
     powertrain_force.min(traction_force)
 }
 
+/// Calculates resistive losses in Newtons, N: rolling (or breakaway) tyre friction and air drag.
+/// Brake force is not included, it is added separately in the braking branch of the net force.
 fn calculate_force_losses(
     car: &Car,
     environment: &Environment,
@@ -41,35 +49,37 @@ fn calculate_force_losses(
         car_state.speed,
     );
 
-    let mut brake_force = 0.0;
-
-    if car_state.braking {
-        brake_force = calculate_brake_force(axle_loads, car.tyre.mu_static, car.brakes.front_bias);
-    }
-
-    friction_loss + air_drag_loss + brake_force
+    friction_loss + air_drag_loss
 }
 
 pub fn calculate_normal_force(mass: f64, g_acceleration: f64) -> f64 {
     mass * g_acceleration
 }
 
-pub fn calculate_net_force(car: &Car, environment: &Environment, car_state: &CarState) -> f64 {
-    let axle_loads = calculate_static_axle_loads(&car.mass, environment.g_acceleration);
-    // TODO: driven axle is hardcoded to rear (RWD); replace with a Drivetrain setting on Car.
-    let driven_axle_normal_force = axle_loads.rear;
-
-    let force_losses = calculate_force_losses(car, environment, car_state, &axle_loads);
+/// Calculates the net longitudinal force on the car in Newtons, N, positive forward.
+///
+/// `axle_loads` are the axle normal forces for this step; in the simulation they are built
+/// from the previous step's acceleration (lagged load transfer, docs/10 section 10.6).
+pub fn calculate_net_force(
+    car: &Car,
+    environment: &Environment,
+    car_state: &CarState,
+    axle_loads: &AxleLoads,
+) -> f64 {
+    let force_losses = calculate_force_losses(car, environment, car_state, axle_loads);
 
     if car_state.braking {
         if car_state.speed == 0.0 {
             0.0
         } else {
-            -force_losses
+            let brake_force =
+                calculate_brake_force(axle_loads, car.tyre.mu_static, car.brakes.front_bias);
+
+            -(force_losses + brake_force)
         }
     } else {
         let powertrain_force = calculate_powertrain_force_tyre_traction_limited(
-            driven_axle_normal_force,
+            axle_loads,
             car_state,
             &car.powertrain,
             &car.tyre,
@@ -98,10 +108,18 @@ mod tests {
         calculate_normal_force, calculate_powertrain_force_tyre_traction_limited,
     };
     use crate::physics::loads::AxleLoads;
-    use crate::physics::powertrain::Powertrain;
+    use crate::physics::powertrain::{Drivetrain, Powertrain};
     use crate::physics::simulation::SimulationConfig;
     use crate::physics::states::CarState;
     use crate::physics::tyres::Tyre;
+
+    /// Default car without load transfer: 407.747196738 kg * 9.81 m/s^2 = 4000 N per axle
+    fn default_static_axle_loads() -> AxleLoads {
+        AxleLoads {
+            front: 4000.0, // Newtons (N)
+            rear: 4000.0,  // Newtons (N)
+        }
+    }
 
     #[test]
     fn test_calculate_powertrain_force_tyre_traction_limited() {
@@ -111,17 +129,15 @@ mod tests {
 
         let tyre = Tyre::default();
 
-        let driven_axle_normal_force: f64 = 4000.0;
-
         let powertrain_force_tyre_traction_limited =
             calculate_powertrain_force_tyre_traction_limited(
-                driven_axle_normal_force,
+                &default_static_axle_loads(),
                 &car_state,
                 &powertrain,
                 &tyre,
             );
 
-        // Car traction = 4000 N * 0.9 = 3600 N
+        // Car traction (RWD) = 4000 N * 0.9 = 3600 N
         // Powertrain force power limited = 800_000 W / 10 m/s = 80000 N
         // Powertrain force torque limited = 800 * 0.8 * 1.5 / 0.36 =  2666.6667 N
         // As Powertrain force torque limited is smallest force and smaller than traction, then expected value: 2666.6667 N
@@ -130,6 +146,47 @@ mod tests {
             "Expected force: 2666.6667 Calculated force: {}",
             powertrain_force_tyre_traction_limited
         );
+    }
+
+    #[test]
+    fn test_traction_limit_follows_drivetrain() {
+        let car_state = CarState {
+            speed: 0.0, // meters per second (m/s)
+            gear: 1,
+            ..CarState::default()
+        };
+        let tyre = Tyre::default();
+        let axle_loads = AxleLoads {
+            front: 5000.0, // Newtons (N)
+            rear: 3000.0,  // Newtons (N)
+        };
+        let mut powertrain = Powertrain::default();
+
+        // Powertrain force at standstill in 1st gear = 800 * 3 * 1.5 / 0.36 = 10000 N,
+        // so in every case below the tyres are the limit
+
+        // RWD: 0.9 * 3000 N = 2700 N
+        powertrain.drivetrain = Drivetrain::RearWheelDrive;
+        let force = calculate_powertrain_force_tyre_traction_limited(
+            &axle_loads, &car_state, &powertrain, &tyre,
+        );
+        assert!((force - 2700.0).abs() < 1e-9, "RWD force: {}", force);
+
+        // FWD: 0.9 * 5000 N = 4500 N
+        powertrain.drivetrain = Drivetrain::FrontWheelDrive;
+        let force = calculate_powertrain_force_tyre_traction_limited(
+            &axle_loads, &car_state, &powertrain, &tyre,
+        );
+        assert!((force - 4500.0).abs() < 1e-9, "FWD force: {}", force);
+
+        // AWD 60:40: min(4500 N / 0.6, 2700 N / 0.4) = min(7500 N, 6750 N) = 6750 N
+        powertrain.drivetrain = Drivetrain::AllWheelDrive {
+            front_torque_split: 0.6,
+        };
+        let force = calculate_powertrain_force_tyre_traction_limited(
+            &axle_loads, &car_state, &powertrain, &tyre,
+        );
+        assert!((force - 6750.0).abs() < 1e-9, "AWD force: {}", force);
     }
 
     #[test]
@@ -176,6 +233,7 @@ mod tests {
             &simulation_config.car,
             &simulation_config.environment,
             &simulation_config.initial_car,
+            &default_static_axle_loads(),
         );
 
         // Using previous values calculated:
@@ -208,11 +266,29 @@ mod tests {
             &simulation_config.car,
             &simulation_config.environment,
             &simulation_config.initial_car,
+            &default_static_axle_loads(),
         );
 
         // Brake force with 0.575 front bias on static loads = 6260.8696 N (see braking.rs)
         // Net force = -282.875 N - 6260.8696 N = -6543.7446 N
         assert!((net_force - (-6543.7446)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_net_force_braking_at_standstill() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.initial_car.braking = true;
+        simulation_config.initial_car.speed = 0.0;
+
+        let net_force = calculate_net_force(
+            &simulation_config.car,
+            &simulation_config.environment,
+            &simulation_config.initial_car,
+            &default_static_axle_loads(),
+        );
+
+        // A stopped car stays stopped: brakes and friction can't push it backwards, expected value: 0 N
+        assert_eq!(net_force, 0.0);
     }
 
     #[test]
@@ -225,6 +301,7 @@ mod tests {
             &simulation_config.car,
             &simulation_config.environment,
             &simulation_config.initial_car,
+            &default_static_axle_loads(),
         );
 
         // Powertrain force torque limited = 800 * 0.5 * 1.5 / 0.36 = 1666.6667 N
@@ -247,6 +324,7 @@ mod tests {
             &simulation_config.car,
             &simulation_config.environment,
             &simulation_config.initial_car,
+            &default_static_axle_loads(),
         );
 
         // Traction limited force = 3600 N, breakaway friction = 8000 * 0.7 = 5600 N

@@ -2,6 +2,7 @@ use crate::physics::car::Car;
 use crate::physics::environment::Environment;
 use crate::physics::forces::{calculate_acceleration, calculate_net_force};
 use crate::physics::integrators::euler;
+use crate::physics::loads::calculate_axle_loads;
 use crate::physics::powertrain::{calculate_transmission_input_revs, select_best_gear};
 use crate::physics::states::CarState;
 use crate::physics::track::{Track, find_active_braking_zone, is_braking_zone};
@@ -67,29 +68,34 @@ impl SimulationState {
     }
 }
 
-/// Calculates car acceleration given the current car model, state, and environment.
+/// Calculates car acceleration in m/s^2 given the current car model, state, and environment.
+///
+/// Axle loads are built from `car_state.acceleration`, the acceleration of the previous step
+/// (lagged load transfer, docs/10 section 10.6), which breaks the circular dependency between
+/// acceleration and load transfer.
 pub fn get_car_acceleration(
     car: &Car,
     car_state: &CarState,
     environment: &Environment,
 ) -> f64 {
-    let force = calculate_net_force(car, environment, car_state);
+    let axle_loads = calculate_axle_loads(
+        &car.mass,
+        &car.geometry,
+        environment.g_acceleration,
+        car_state.acceleration,
+    );
+    let force = calculate_net_force(car, environment, car_state, &axle_loads);
 
     calculate_acceleration(force, car.mass.total)
 }
 
-/// Calculates car speed given the current car model, state, environment model and simulation_config.
+/// Calculates car speed given the current car state, simulation_config and acceleration of this step.
 fn get_car_speed(
-    car: &Car,
     car_state: &CarState,
-    environment: &Environment,
     simulation_config: &SimulationConfig,
+    acceleration: f64,
 ) -> f64 {
-    let acceleration = get_car_acceleration(car, car_state, environment);
-
-    let speed = euler(car_state.speed, acceleration, simulation_config.time_step);
-
-    speed
+    euler(car_state.speed, acceleration, simulation_config.time_step)
 }
 
 /// Calculates car distance given the current car model, state, environment model and simulation_config.
@@ -151,15 +157,24 @@ fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &S
         simulation_state.car.gear,
     );
 
-    simulation_state.car.speed = get_car_speed(
+    // Acceleration is computed once per step from the previous step's acceleration (load
+    // transfer), then stored so the next step can use it.
+    simulation_state.car.acceleration = get_car_acceleration(
         &simulation_config.car,
         &simulation_state.car,
         &simulation_config.environment,
-        &simulation_config,
+    );
+
+    simulation_state.car.speed = get_car_speed(
+        &simulation_state.car,
+        simulation_config,
+        simulation_state.car.acceleration,
     );
 
     if simulation_state.car.speed <= 0.0 && simulation_state.car.braking {
+        // Car has stopped: it is no longer decelerating, so no load transfer either
         simulation_state.car.speed = 0.0;
+        simulation_state.car.acceleration = 0.0;
     }
 
     simulation_state.car.distance = get_car_distance(
@@ -240,18 +255,58 @@ mod tests {
     }
 
     #[test]
+    fn test_get_car_acceleration_uses_stored_acceleration() {
+        let mut simulation_config = SimulationConfig::default();
+        // 1st gear at 10 m/s: powertrain force = min(800_000 / 10, 800 * 3 * 1.5 / 0.36) = 10000 N,
+        // so the rear (driven) axle grip is the limit
+        simulation_config.initial_car.gear = 1;
+
+        let acceleration_without_transfer = get_car_acceleration(
+            &simulation_config.car,
+            &simulation_config.initial_car,
+            &simulation_config.environment,
+        );
+
+        // Previous acceleration 0 m/s^2 -> static rear load 4000 N -> traction 0.9 * 4000 N = 3600 N
+        // Net force = 3600 N - 282.875 N = 3317.125 N
+        // Acceleration = 3317.125 N / 815.494393476 kg = 4.067623 m/s^2
+        assert!(
+            (acceleration_without_transfer - 4.067623).abs() < 1e-3,
+            "Calculated value: {}",
+            acceleration_without_transfer
+        );
+
+        simulation_config.initial_car.acceleration = 5.0;
+        let acceleration_with_transfer = get_car_acceleration(
+            &simulation_config.car,
+            &simulation_config.initial_car,
+            &simulation_config.environment,
+        );
+
+        // Previous acceleration 5 m/s^2 -> load transfer = 815.494393476 kg * 5 m/s^2 * 0.3 m / 3.4 m = 359.7769 N
+        // Rear load = 4000 N + 359.7769 N = 4359.7769 N -> traction = 0.9 * 4359.7769 N = 3923.7992 N
+        // Net force = 3923.7992 N - 282.875 N = 3640.9242 N
+        // Acceleration = 3640.9242 N / 815.494393476 kg = 4.464749 m/s^2
+        assert!(
+            (acceleration_with_transfer - 4.464749).abs() < 1e-3,
+            "Calculated value: {}",
+            acceleration_with_transfer
+        );
+    }
+
+    #[test]
     fn test_get_car_speed() {
         let simulation_config = SimulationConfig::default();
 
         let mut simulation_state = SimulationState::new(&simulation_config);
         simulation_state.car.gear = 4;
 
-        let speed = get_car_speed(
+        let acceleration = get_car_acceleration(
             &simulation_config.car,
             &simulation_state.car,
             &simulation_config.environment,
-            &simulation_config,
         );
+        let speed = get_car_speed(&simulation_state.car, &simulation_config, acceleration);
 
         // from previous test results we know:
         // expected value: speed = 10 + 2.92312457212 * 0.001 =    10.0029231246
@@ -340,6 +395,11 @@ mod tests {
     fn test_simulation_speed_increase() {
         let mut simulation_config = SimulationConfig::default();
         simulation_config.end_time = 1.0;
+        // This test checks the time stepping only, so load transfer is switched off (CoG on the
+        // ground reduces the model to static axle loads). With load transfer, the first step of a
+        // 0.5 s+ time step uses a lagged acceleration of 0 and misses the rear load gain the
+        // 1 ms run gets, so the coarse run ends slower (the lag error from docs/10 section 10.6).
+        simulation_config.car.geometry.cog_height = 0.0;
 
         let mut speed_slower = start_simulation(&simulation_config, false, false)
             .car
@@ -380,6 +440,8 @@ mod tests {
 
         let end_state = start_simulation(&simulation_config, false, false);
         assert_eq!(end_state.car.speed, 0.0);
+        // Stopped car is no longer decelerating
+        assert_eq!(end_state.car.acceleration, 0.0);
     }
 
     #[test]
