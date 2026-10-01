@@ -21,8 +21,11 @@ impl Default for Tyre {
     fn default() -> Self {
         Self {
             mu_static: 0.9,
+            // Placeholders pending a sourced value. mu_breakaway sits just above mu_rolling:
+            // the old 0.7 gave 5600 N of breakaway resistance against 3600 N of traction,
+            // so the car could never launch from rest.
             mu_rolling: 0.03,
-            mu_breakaway: 0.7,
+            mu_breakaway: 0.035,
             wheel_radius: 0.36,
         }
     }

@@ -505,6 +505,67 @@ mod tests {
     }
 
     #[test]
+    fn test_car_launches_from_standstill() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.initial_car.speed = 0.0;
+        simulation_config.initial_car.distance = 0.0;
+        simulation_config.initial_car.gear = 1;
+        simulation_config.end_time = 1.0;
+
+        let end_state = start_simulation(&simulation_config, false, false);
+
+        // Net force at rest = 3600 N - 280 N = 3320 N > 0 (see forces.rs), so the car must move off.
+        // With the old mu_breakaway = 0.7 (5600 N > 3600 N) it stayed at 0 m/s forever.
+        assert!(
+            end_state.car.speed > 0.0,
+            "Car didn't launch, speed: {}",
+            end_state.car.speed
+        );
+        assert!(end_state.car.distance > 0.0);
+    }
+
+    #[test]
+    fn test_car_never_moves_backwards() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.initial_car.speed = 0.0;
+        simulation_config.initial_car.distance = 0.0;
+        simulation_config.initial_car.gear = 1;
+        // Launch, accelerate for 50 m, then brake until stopped
+        simulation_config.track.braking_zones = vec![(50.0, 1000.0)];
+
+        let mut simulation_state = SimulationState::new(&simulation_config);
+        let mut last_distance = simulation_state.car.distance;
+        let mut braked = false;
+
+        for _ in 0..20_000 {
+            simulation_step(&mut simulation_state, &simulation_config);
+
+            assert!(
+                simulation_state.car.speed >= 0.0,
+                "Negative speed: {}",
+                simulation_state.car.speed
+            );
+            assert!(
+                simulation_state.car.distance >= last_distance,
+                "Car moved backwards: {} -> {}",
+                last_distance,
+                simulation_state.car.distance
+            );
+            last_distance = simulation_state.car.distance;
+            braked |= simulation_state.car.braking;
+
+            if simulation_state.car.braking && simulation_state.car.speed == 0.0 {
+                break;
+            }
+        }
+
+        // The scenario must actually reach the braking zone and stop, otherwise it proves nothing
+        assert!(braked, "Car never reached the braking zone");
+        assert_eq!(simulation_state.car.speed, 0.0);
+        assert_eq!(simulation_state.car.acceleration, 0.0);
+    }
+
+    #[test]
     fn test_validate_accepts_default() {
         assert_eq!(SimulationConfig::default().validate(), Ok(()));
     }
