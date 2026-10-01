@@ -7,8 +7,10 @@ pub(crate) fn calculate_brake_force(axle_loads: &AxleLoads, mu_static: f64) -> f
 #[cfg(test)]
 mod tests {
     use crate::physics::braking::calculate_brake_force;
+    use crate::physics::car::Car;
+    use crate::physics::environment::Environment;
     use crate::physics::loads::calculate_static_axle_loads;
-    use crate::physics::{Car, Environment, Tyre};
+    use crate::physics::tyres::Tyre;
 
     #[test]
     fn test_calculate_brake_force() {

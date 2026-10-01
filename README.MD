@@ -39,8 +39,7 @@ Every cycle (`simulation_step`) executes in this order:
 3. Write simple model for car pitch and roll.
 4. Add tests for car pitch and roll.
 5. Convert codebase to a crate library and publish it at crates.io.
-6. Move structs from `physics/mod.rs` to modules related to the struct in `/physics`.
-7. Plan out TODOs for 2D simulation integration. 
+6. Plan out TODOs for 2D simulation integration. 
 
 ---
 

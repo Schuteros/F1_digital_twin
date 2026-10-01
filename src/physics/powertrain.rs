@@ -4,9 +4,43 @@
 //! [Powertrain Engine Documentation](../../docs/02_Powertrain_Force_Dynamics.MD)
 //! [Clutch Dynamics Documentation](../../docs/08_clutch_dynamics.MD)
 
-use crate::physics::Powertrain;
 use crate::physics::states::CarState;
 use std::f64::consts::PI;
+
+/// Contains all the variables that define the powertrain
+pub struct Powertrain {
+    /// Power from the powertrain that is delivered to the wheels in Watts, W
+    pub power: f64,
+    /// Maximum torque on the wheels delivered from the powertrain in Newton meters, Nm
+    pub max_torque: f64,
+    /// Max rotational speed of the engine in Hertz, Hz
+    pub max_revs: f64,
+    /// Min rotational speed of the engine in Hertz, Hz
+    pub min_revs: f64,
+    /// Gear ratios from largest to smallest
+    pub gear_ratios: Vec<f64>,
+    /// Final drive ratio
+    pub final_drive: f64,
+    /// Shift up margin in Hertz, Hz
+    pub shift_up_margin: f64,
+    /// Shift down margin in Hertz, Hz
+    pub shift_down_margin: f64,
+}
+
+impl Default for Powertrain {
+    fn default() -> Self {
+        Self {
+            power: 800_000.0,
+            max_torque: 800.0,
+            max_revs: 133.33,
+            min_revs: 13.33,
+            gear_ratios: vec![3.0, 2.0, 1.0, 0.8, 0.5],
+            final_drive: 1.5,
+            shift_up_margin: 0.5,
+            shift_down_margin: 0.5,
+        }
+    }
+}
 
 /// Calculates force from powertrain that is limited by power output
 pub(crate) fn calculate_force_power_limited(powertrain_power: f64, car_speed: f64) -> f64 {

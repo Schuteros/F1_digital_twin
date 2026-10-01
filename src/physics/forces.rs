@@ -1,10 +1,11 @@
 use crate::physics::aero::calculate_air_drag;
 use crate::physics::braking::calculate_brake_force;
+use crate::physics::car::Car;
+use crate::physics::environment::Environment;
 use crate::physics::loads::{AxleLoads, calculate_static_axle_loads};
-use crate::physics::powertrain::calculate_force_from_powertrain;
+use crate::physics::powertrain::{Powertrain, calculate_force_from_powertrain};
 use crate::physics::states::CarState;
-use crate::physics::tyres::{calculate_current_tyre_friction, calculate_force_static_friction};
-use crate::physics::{Car, Environment, Powertrain, Tyre};
+use crate::physics::tyres::{Tyre, calculate_current_tyre_friction, calculate_force_static_friction};
 
 fn calculate_powertrain_force_tyre_traction_limited(
     driven_axle_normal_force: f64,
@@ -97,8 +98,10 @@ mod tests {
         calculate_normal_force, calculate_powertrain_force_tyre_traction_limited,
     };
     use crate::physics::loads::AxleLoads;
+    use crate::physics::powertrain::Powertrain;
+    use crate::physics::simulation::SimulationConfig;
     use crate::physics::states::CarState;
-    use crate::physics::{Powertrain, SimulationConfig, Tyre};
+    use crate::physics::tyres::Tyre;
 
     #[test]
     fn test_calculate_powertrain_force_tyre_traction_limited() {

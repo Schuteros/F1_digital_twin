@@ -1,6 +1,6 @@
 //! Functions related to axle normal loads
 
-use crate::physics::Mass;
+use crate::physics::car::Mass;
 use crate::physics::forces::calculate_normal_force;
 
 /// Normal forces acting on each axle
@@ -29,7 +29,7 @@ pub(crate) fn calculate_static_axle_loads(mass: &Mass, g_acceleration: f64) -> A
 
 #[cfg(test)]
 mod tests {
-    use crate::physics::Mass;
+    use crate::physics::car::Mass;
     use crate::physics::loads::{AxleLoads, calculate_static_axle_loads};
 
     #[test]
