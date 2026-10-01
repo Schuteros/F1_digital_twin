@@ -25,6 +25,33 @@ pub struct Powertrain {
     pub shift_up_margin: f64,
     /// Shift down margin in Hertz, Hz
     pub shift_down_margin: f64,
+    /// Which axles the powertrain drives
+    pub drivetrain: Drivetrain,
+}
+
+/// Defines which axles receive the powertrain force
+pub enum Drivetrain {
+    /// All powertrain force goes to the front axle
+    FrontWheelDrive,
+    /// All powertrain force goes to the rear axle
+    RearWheelDrive,
+    /// Powertrain force is split between both axles
+    AllWheelDrive {
+        /// Fraction of the powertrain force sent to the front axle, dimensionless, 0.0..=1.0
+        /// (rear gets 1 - front_torque_split)
+        front_torque_split: f64,
+    },
+}
+
+impl Drivetrain {
+    /// Fraction of the powertrain force delivered to the front axle, dimensionless, 0.0..=1.0
+    pub(crate) fn front_share(&self) -> f64 {
+        match self {
+            Drivetrain::FrontWheelDrive => 1.0,
+            Drivetrain::RearWheelDrive => 0.0,
+            Drivetrain::AllWheelDrive { front_torque_split } => *front_torque_split,
+        }
+    }
 }
 
 impl Default for Powertrain {
@@ -38,6 +65,7 @@ impl Default for Powertrain {
             final_drive: 1.5,
             shift_up_margin: 0.5,
             shift_down_margin: 0.5,
+            drivetrain: Drivetrain::RearWheelDrive,
         }
     }
 }
@@ -296,5 +324,18 @@ mod tests {
             force,
             10_000.0
         );
+    }
+
+    #[test]
+    fn test_drivetrain_front_share() {
+        // FWD sends everything to the front axle
+        assert_eq!(Drivetrain::FrontWheelDrive.front_share(), 1.0);
+        // RWD sends nothing to the front axle
+        assert_eq!(Drivetrain::RearWheelDrive.front_share(), 0.0);
+        // AWD sends the configured split to the front axle
+        let all_wheel_drive = Drivetrain::AllWheelDrive {
+            front_torque_split: 0.35,
+        };
+        assert_eq!(all_wheel_drive.front_share(), 0.35);
     }
 }
