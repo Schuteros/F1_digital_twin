@@ -1,5 +1,23 @@
 //! Functions related to the aerodynamic forces
 
+/// Contains all the info about the aerodynamics of the car
+pub struct Aero {
+    /// drag coefficient of the car
+    pub drag_coefficient: f64,
+
+    /// frontal area of the car
+    pub frontal_area: f64,
+}
+
+impl Default for Aero {
+    fn default() -> Self {
+        Self {
+            drag_coefficient: 0.35,
+            frontal_area: 2.0,
+        }
+    }
+}
+
 /// Calculates air drag
 pub(crate) fn calculate_air_drag(
     air_density: f64,

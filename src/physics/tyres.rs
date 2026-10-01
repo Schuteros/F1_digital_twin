@@ -1,5 +1,31 @@
 //! Functions related to tyre physics
 
+/// Model defines the tyres used to simulate the car
+pub struct Tyre {
+    /// mu static friction which limits traction of the wheel
+    pub mu_static: f64,
+
+    /// mu rolling friction is the friction opposite to the movement that tries to stop the car
+    pub mu_rolling: f64,
+
+    /// mu breakaway friction is the friction that needs to be overcome to start moving the car
+    pub mu_breakaway: f64,
+
+    /// wheel radius
+    pub wheel_radius: f64,
+}
+
+impl Default for Tyre {
+    fn default() -> Self {
+        Self {
+            mu_static: 0.9,
+            mu_rolling: 0.03,
+            mu_breakaway: 0.7,
+            wheel_radius: 0.36,
+        }
+    }
+}
+
 /// Calculates rolling friction force from tyres knowing tyre model
 pub(crate) fn calculate_force_tyre_friction_rolling(
     total_normal_force: f64,

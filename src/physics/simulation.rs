@@ -1,9 +1,71 @@
+use crate::physics::car::Car;
+use crate::physics::environment::Environment;
 use crate::physics::forces::{calculate_acceleration, calculate_net_force};
 use crate::physics::integrators::euler;
 use crate::physics::powertrain::{calculate_transmission_input_revs, select_best_gear};
 use crate::physics::states::CarState;
-use crate::physics::track::{find_active_braking_zone, is_braking_zone};
-pub(crate) use crate::physics::{Car, Environment, SimulationConfig, SimulationState};
+use crate::physics::track::{Track, find_active_braking_zone, is_braking_zone};
+
+/// Holds all the values needed for the simulation
+pub(crate) struct SimulationState {
+    pub(crate) car: CarState,
+    pub(crate) time: f64, // Seconds (s)
+}
+
+/// Holds all the initial values to start simulation
+pub struct SimulationConfig {
+    /// Initial state of the car at the start of the simulation
+    pub initial_car: CarState,
+
+    /// Car model containing all the specs and assumptions of the car
+    pub car: Car,
+
+    /// Contains the starting conditions of the environment
+    pub environment: Environment,
+
+    /// Contains the track configuration
+    pub track: Track,
+
+    /// Start time of the simulation in seconds, s
+    /// **Range:**
+    /// * min: f64::MIN
+    /// * max: <end_time
+    pub start_time: f64, // Seconds (s)
+
+    /// End time of the simulation in seconds, s
+    /// **Range:**
+    /// * min: >start_time
+    /// * max: f64::MAX
+    pub end_time: f64, // Seconds (s)
+
+    /// Time step of the simulation in seconds, s
+    /// * Smaller value increases accuracy of the simulation, but increases computation time linearly
+    /// * Larger value decreases computation time linearly, but at cost of reduced accuracy of the simulation
+    pub time_step: f64,
+}
+
+impl Default for SimulationConfig {
+    fn default() -> Self {
+        Self {
+            initial_car: CarState::default(),
+            car: Car::default(),
+            environment: Environment::default(),
+            track: Track::default(),
+            start_time: 0.0,
+            end_time: 1.0,
+            time_step: 0.001,
+        }
+    }
+}
+
+impl SimulationState {
+    pub fn new(config: &SimulationConfig) -> Self {
+        Self {
+            car: config.initial_car.clone(),
+            time: config.start_time,
+        }
+    }
+}
 
 /// Calculates car acceleration given the current car model, state, and environment.
 pub fn get_car_acceleration(
@@ -153,10 +215,9 @@ pub fn start_simulation(
 #[cfg(test)]
 mod tests {
     use crate::physics::simulation::{
-        calculate_total_steps, get_car_acceleration, get_car_distance, get_car_speed,
-        simulation_step, start_simulation,
+        SimulationConfig, SimulationState, calculate_total_steps, get_car_acceleration,
+        get_car_distance, get_car_speed, simulation_step, start_simulation,
     };
-    use crate::physics::{SimulationConfig, SimulationState};
 
     #[test]
     fn test_get_car_acceleration() {
