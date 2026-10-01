@@ -120,11 +120,64 @@ previous time step**, stored in `CarState`:
 $$F_{z,\text{axle}}(t) = f\left(a_x(t - \Delta t)\right) \tag{10.8.}$$
 
 At $\Delta t = 1 \text{ ms}$ this lag is negligible for straight-line acceleration and braking.
-The geometric parameters $h$, $L$, $l_f$ and $l_r$ are held in the `ChassisGeometry` struct.
+At very large time steps (hundreds of milliseconds) it is not: the first step always sees the
+initial acceleration, so the load transfer arrives one whole step late.
+
+The `ChassisGeometry` struct holds only the wheelbase $L$ and the CoG height $h$. The CoG to axle
+distances $l_f$ and $l_r$ are not stored. They are derived from the front and rear masses in
+`Mass` ($l_r / L$ = `mass.front / mass.total`, equation 6.1), so the static weight
+distribution has a single source of truth. The axle loads are computed by
+`calculate_axle_loads`, which clamps the front load to $[0, m \cdot g]$ and sets the rear load
+to the remainder, so equation 10.3 always holds.
 
 ---
 
-## 10.7. Architectural Notes and Real-World Limitations
+## 10.7. Consequences for Acceleration and Drive Split
+
+This mirrors section 10.5 for the driven axles. The powertrain force is split between the axles
+by a front drive share $\delta$, which is set by the drivetrain (FWD: $\delta = 1$, RWD: $\delta = 0$,
+AWD: $\delta$ = `front_torque_split`):
+
+$$F_{\text{drive, front}} = \delta \cdot F_{\text{drive}}, \qquad F_{\text{drive, rear}} = (1 - \delta) \cdot F_{\text{drive}} \tag{10.9.}$$
+
+where:
+* $\delta$ is front drive share, dimensionless, in the range $[0, 1]$,
+* $F_{\text{drive}}$ is total powertrain force at the contact patches in Newtons (N).
+
+Under acceleration, load transfer shrinks the front axle's traction limit and grows the rear's,
+the opposite of braking. Assuming ideal traction control, the first axle to reach its limit
+caps the total:
+
+$$F_{\text{traction, max}} = \min\left( \frac{\mu_{\text{static}} \cdot F_{z,\text{front}}}{\delta}, \, \frac{\mu_{\text{static}} \cdot F_{z,\text{rear}}}{1 - \delta} \right) \tag{10.10.}$$
+
+with $F_{\text{traction, max}} = \mu_{\text{static}} \cdot F_{z,\text{rear}}$ for $\delta = 0$ and
+$\mu_{\text{static}} \cdot F_{z,\text{front}}$ for $\delta = 1$. This is the same limit as threshold
+braking (section 9.3); both use `calculate_split_force_limit`.
+
+Both axles saturate together when $\delta = F_{z,\text{front}} / (m \cdot g)$. At the grip limit
+$a_x = \mu_{\text{static}} \cdot g$ (neglecting drag and rolling resistance), equation 10.2 gives
+the ideal front drive split:
+
+$$\delta_{\text{ideal}} = \frac{l_r}{L} - \frac{\mu_{\text{static}} \cdot h}{L} \tag{10.11.}$$
+
+i.e. the static front fraction minus $\mu h / L$. The ideal brake bias is the mirror image,
+$\beta_{\text{ideal}} = l_r / L + \mu h / L$: under acceleration the ideal split lies further
+**rearward** than the static weight distribution, under braking further **forward**.
+
+For a rear-wheel-drive car the rear load grows with the acceleration it produces. Solving
+$m \cdot a_x = \mu_{\text{static}} \cdot F_{z,\text{rear}}(a_x)$ with equation 10.4 gives the
+traction-limited acceleration:
+
+$$a_{x,\text{max, RWD}} = \frac{\mu_{\text{static}} \cdot g \cdot l_f / L}{1 - \mu_{\text{static}} \cdot h / L} \tag{10.12.}$$
+
+Example with the default (placeholder) values $l_r/L = l_f/L = 0.5$, $\mu = 0.9$, $h = 0.3$ m,
+$L = 3.4$ m: $\mu h / L = 0.0794$, so $\delta_{\text{ideal}} = 0.421$, $\beta_{\text{ideal}} = 0.579$
+(the default bias 0.575 is just below it), and $a_{x,\text{max, RWD}} = 4.79$ m/s² instead of
+$4.41$ m/s² without load transfer.
+
+---
+
+## 10.8. Architectural Notes and Real-World Limitations
 
 [!WARNING]
 This is a steady-state, rigid-body load transfer model. It assumes the load transfer reaches

@@ -42,27 +42,58 @@ where:
 
 ---
 
-## 9.3. Total Longitudinal Retarding Force
+## 9.3. Brake Bias and Threshold Braking
 
-The net braking force acting on the vehicle's center of gravity is the direct summation of the
-clamped braking forces evaluated independently across both front and rear axles:
+The axles do not brake independently. The brake system splits the total braking force between
+them with a fixed front brake bias $\beta$ (`Brakes::front_bias`), so the axle forces are always
+in the ratio $\beta : (1 - \beta)$:
 
-$$F_{\text{brake, total}} = F_{\text{brake, front}} + F_{\text{brake, rear}}, \tag{9.4.}$$
+$$F_{\text{brake, front}} = \beta \cdot F_{\text{brake, total}}, \qquad F_{\text{brake, rear}} = (1 - \beta) \cdot F_{\text{brake, total}} \tag{9.4.}$$
+
+The simulation models **threshold braking**: the driver (or an ideal ABS) raises the brake demand
+until the first axle reaches its traction limit (equations 9.2 and 9.3), and no further. Neither
+axle locks, and the total is capped by whichever axle saturates first:
+
+$$F_{\text{brake, total}} = \min\left( \frac{F_{\text{max, front}}}{\beta}, \, \frac{F_{\text{max, rear}}}{1 - \beta} \right), \tag{9.5.}$$
+
+with the edge cases handled explicitly:
+
+$$F_{\text{brake, total}} = F_{\text{max, front}} \;\; \text{for} \;\; \beta = 1, \qquad F_{\text{brake, total}} = F_{\text{max, rear}} \;\; \text{for} \;\; \beta = 0, \tag{9.6.}$$
 
 where:
 * $F_{\text{brake, total}}$ is total longitudinal retarding force applied to the chassis in Newtons (N),
-* $F_{\text{brake, front}}$ is clamped braking force developed at the front axle in Newtons (N),
-* $F_{\text{brake, rear}}$ is clamped braking force developed at the rear axle in Newtons (N).
+* $F_{\text{brake, front}}$, $F_{\text{brake, rear}}$ are braking forces developed at the front and rear axle in Newtons (N),
+* $\beta$ is front brake bias ratio, dimensionless, in the range $[0, 1]$.
+
+Consequences:
+* The total can never exceed $\mu_{\text{peak}} \cdot (F_{z,\text{front}} + F_{z,\text{rear}})$. It
+  reaches that value only when $\beta$ equals the front axle's share of the normal load,
+  $\beta = F_{z,\text{front}} / F_{z,\text{total}}$; then both axles saturate together.
+* For any other bias, one axle saturates while the other still has unused grip. This replaces
+  the earlier per-axle clamp, which summed both axle limits independently and so always braked
+  at the full $\mu_{\text{peak}} \cdot F_{z,\text{total}}$ regardless of bias.
+* The axle normal forces include longitudinal load transfer (section 10.5), so the front limit
+  grows and the rear limit shrinks as the car decelerates. The ideal bias therefore lies
+  further forward than the static weight distribution.
+
+Example with static loads $F_{z,\text{front}} = F_{z,\text{rear}} = 4000$ N, $\mu_{\text{peak}} = 0.9$
+and $\beta = 0.575$: front gives $3600 / 0.575 = 6260.9$ N, rear gives $3600 / 0.425 = 8470.6$ N,
+so the front axle saturates first and $F_{\text{brake, total}} = 6260.9$ N (below the 7200 N total grip).
+
+The same split limit is used for the drive force (section 10.7), with the drive split in
+place of the brake bias. In code both use `calculate_split_force_limit`.
 
 ---
 
 ## 9.4. Architectural Notes and Real-World Limitations
 
 [!WARNING]
-This baseline braking model assumes instantaneous hydraulic pressure build-up, ideal brake
-bias distribution, and operation strictly up to the static rolling friction point ($\mu_{\text{peak}}$).
-It does not currently simulate full dynamic wheel lockup transitions into kinetic sliding
-($\mu_{\text{sliding}}$), brake pad thermal fade, or Anti-lock Braking System (ABS) pressure
-pulsation routines. By clamping retarding force directly against normal load boundaries,
-the module maintains strictly deterministic $O(1)$ stack execution and zero-allocation execution
-at fixed 1 kHz sub-stepping, providing a robust baseline for 0–100–0 km/h stopping distance benchmarks.
+This braking model assumes instantaneous hydraulic pressure build-up, a fixed brake bias, and
+ideal threshold modulation: the brake demand is always exactly the largest force that keeps
+both axles at or below the static friction point ($\mu_{\text{peak}}$). Partial braking (a
+pedal demand below the threshold) is not modelled yet. The model does not simulate dynamic
+wheel lockup transitions into kinetic sliding ($\mu_{\text{sliding}}$), brake pad thermal fade,
+brake-by-wire rear axle control, or Anti-lock Braking System (ABS) pressure pulsation routines.
+By bounding retarding force directly against normal load boundaries, the module maintains
+strictly deterministic $O(1)$ stack execution and zero-allocation execution at fixed 1 kHz
+sub-stepping, providing a robust baseline for 0–100–0 km/h stopping distance benchmarks.
