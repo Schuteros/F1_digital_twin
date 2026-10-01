@@ -30,6 +30,8 @@ pub struct Powertrain {
 }
 
 /// Defines which axles receive the powertrain force
+// Full names are kept for readability. FWD / AWD are config options, main.rs only uses the default.
+#[allow(clippy::enum_variant_names, dead_code)]
 pub enum Drivetrain {
     /// All powertrain force goes to the front axle
     FrontWheelDrive,
@@ -231,9 +233,11 @@ mod tests {
     fn test_force_from_powertrain_standstill() {
         let powertrain = Powertrain::default();
         let wheel_radius: f64 = 0.36;
-        let mut car_state: CarState = Default::default();
-        car_state.speed = 0.0;
-        car_state.gear = 1;
+        let car_state = CarState {
+            speed: 0.0,
+            gear: 1,
+            ..CarState::default()
+        };
 
         let force: f64 =
             calculate_force_from_powertrain(&powertrain, wheel_radius, &car_state);
@@ -248,8 +252,10 @@ mod tests {
     #[test]
     fn test_force_from_powertrain_moving() {
         let powertrain = Powertrain::default();
-        let mut car_state: CarState = Default::default();
-        car_state.gear = 4;
+        let car_state = CarState {
+            gear: 4,
+            ..CarState::default()
+        };
         let wheel_radius: f64 = 0.36; // meters (m)
 
         let force: f64 =
@@ -294,7 +300,7 @@ mod tests {
 
         let clutch_need = check_clutch_need(&powertrain, wheel_radius, &car_state);
 
-        assert_eq!(clutch_need, false);
+        assert!(!clutch_need);
     }
 
     #[test]

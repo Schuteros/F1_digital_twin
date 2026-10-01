@@ -66,17 +66,10 @@ mod tests {
                 active_zone += 1;
             }
 
-            if position_on_track >= 200.0 && position_on_track <= 300.0 {
-                assert!(
-                    is_braking_zone(&track.braking_zones, position_on_track, active_zone),
-                    "Did not register braking zone"
-                );
-            } else if position_on_track >= 300.0 && position_on_track <= 400.0 {
-                assert!(
-                    is_braking_zone(&track.braking_zones, position_on_track, active_zone),
-                    "Did not register braking zone"
-                );
-            } else if position_on_track >= 450.0 && position_on_track <= 500.0 {
+            if (200.0..=300.0).contains(&position_on_track)
+                || (300.0..=400.0).contains(&position_on_track)
+                || (450.0..=500.0).contains(&position_on_track)
+            {
                 assert!(
                     is_braking_zone(&track.braking_zones, position_on_track, active_zone),
                     "Did not register braking zone"
