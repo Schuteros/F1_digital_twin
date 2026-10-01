@@ -315,10 +315,36 @@ mod tests {
     }
 
     #[test]
+    fn test_net_force_launch_from_standstill() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.initial_car.speed = 0.0;
+        simulation_config.initial_car.gear = 1;
+
+        let net_force = calculate_net_force(
+            &simulation_config.car,
+            &simulation_config.environment,
+            &simulation_config.initial_car,
+            &default_static_axle_loads(),
+        );
+
+        // Powertrain force in 1st gear = 800 * 3 * 1.5 / 0.36 = 10000 N
+        // Traction limited force (RWD) = 0.9 * 4000 N = 3600 N
+        // Breakaway friction = 8000 N * 0.035 = 280 N, air drag at 0 m/s = 0 N
+        // Net force = 3600 N - 280 N = 3320 N
+        assert!(
+            (net_force - 3320.0).abs() < 1e-9,
+            "Expected value: 3320, calculated value: {}",
+            net_force
+        );
+    }
+
+    #[test]
     fn test_net_force_standstill_not_negative() {
         let mut simulation_config = SimulationConfig::default();
         simulation_config.initial_car.speed = 0.0;
         simulation_config.initial_car.gear = 1;
+        // Breakaway friction set explicitly higher than the traction limit
+        simulation_config.car.tyre.mu_breakaway = 0.7;
 
         let net_force = calculate_net_force(
             &simulation_config.car,
