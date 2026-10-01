@@ -1,6 +1,7 @@
 //! Car model: specs and mass distribution
 
 use crate::physics::aero::Aero;
+use crate::physics::braking::Brakes;
 use crate::physics::powertrain::Powertrain;
 use crate::physics::tyres::Tyre;
 
@@ -20,6 +21,9 @@ pub struct Car {
 
     /// Defines the chassis geometry used for longitudinal load transfer
     pub geometry: ChassisGeometry,
+
+    /// Defines the brake system of the car
+    pub brakes: Brakes,
 }
 
 /// Contains mass distribution data
@@ -68,6 +72,7 @@ impl Default for Car {
             tyre: Tyre::default(),
             aero: Aero::default(),
             geometry: ChassisGeometry::default(),
+            brakes: Brakes::default(),
         }
     }
 }

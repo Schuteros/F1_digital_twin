@@ -44,7 +44,7 @@ fn calculate_force_losses(
     let mut brake_force = 0.0;
 
     if car_state.braking {
-        brake_force = calculate_brake_force(axle_loads, car.tyre.mu_static);
+        brake_force = calculate_brake_force(axle_loads, car.tyre.mu_static, car.brakes.front_bias);
     }
 
     friction_loss + air_drag_loss + brake_force
@@ -210,8 +210,9 @@ mod tests {
             &simulation_config.initial_car,
         );
 
-        // From previous calculations: net force = -282.875 - 7200 = -7482.875 N
-        assert!((net_force - (-7482.875)).abs() < 1e-4);
+        // Brake force with 0.575 front bias on static loads = 6260.8696 N (see braking.rs)
+        // Net force = -282.875 N - 6260.8696 N = -6543.7446 N
+        assert!((net_force - (-6543.7446)).abs() < 1e-4);
     }
 
     #[test]
