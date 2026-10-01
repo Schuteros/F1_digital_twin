@@ -5,6 +5,7 @@ mod aero;
 pub mod braking;
 mod forces;
 mod integrators;
+mod loads;
 mod powertrain;
 pub(crate) mod simulation;
 mod states;

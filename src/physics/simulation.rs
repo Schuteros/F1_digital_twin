@@ -11,15 +11,7 @@ pub fn get_car_acceleration(
     car_state: &CarState,
     environment: &Environment,
 ) -> f64 {
-    let force = calculate_net_force(
-        &car.mass,
-        car.mass.rear, // or driven axle mass
-        car_state,
-        &car.powertrain,
-        &car.tyre,
-        environment,
-        &car.aero,
-    );
+    let force = calculate_net_force(car, environment, car_state);
 
     calculate_acceleration(force, car.mass.total)
 }
