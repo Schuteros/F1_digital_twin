@@ -123,8 +123,10 @@ mod tests {
 
     #[test]
     fn test_calculate_powertrain_force_tyre_traction_limited() {
-        let mut car_state = CarState::default();
-        car_state.gear = 4;
+        let car_state = CarState {
+            gear: 4,
+            ..CarState::default()
+        };
         let powertrain = Powertrain::default();
 
         let tyre = Tyre::default();
@@ -160,13 +162,15 @@ mod tests {
             front: 5000.0, // Newtons (N)
             rear: 3000.0,  // Newtons (N)
         };
-        let mut powertrain = Powertrain::default();
+        let mut powertrain = Powertrain {
+            drivetrain: Drivetrain::RearWheelDrive,
+            ..Powertrain::default()
+        };
 
         // Powertrain force at standstill in 1st gear = 800 * 3 * 1.5 / 0.36 = 10000 N,
         // so in every case below the tyres are the limit
 
         // RWD: 0.9 * 3000 N = 2700 N
-        powertrain.drivetrain = Drivetrain::RearWheelDrive;
         let force = calculate_powertrain_force_tyre_traction_limited(
             &axle_loads, &car_state, &powertrain, &tyre,
         );

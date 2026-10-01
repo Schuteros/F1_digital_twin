@@ -115,7 +115,7 @@ impl SimulationConfig {
 impl SimulationState {
     pub fn new(config: &SimulationConfig) -> Self {
         Self {
-            car: config.initial_car.clone(),
+            car: config.initial_car,
             time: config.start_time,
         }
     }
@@ -157,9 +157,7 @@ fn get_car_distance(
     simulation_config: &SimulationConfig,
     speed: f64,
 ) -> f64 {
-    let distance = euler(car_state.distance, speed, simulation_config.time_step);
-
-    distance
+    euler(car_state.distance, speed, simulation_config.time_step)
 }
 
 /// Checks if the car has stopped and won't continue to drive
@@ -232,7 +230,7 @@ fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &S
 
     simulation_state.car.distance = get_car_distance(
         &simulation_state.car,
-        &simulation_config,
+        simulation_config,
         simulation_state.car.speed,
     );
 
@@ -418,9 +416,11 @@ mod tests {
 
     #[test]
     fn test_simulation_convergence() {
-        let mut simulation_config = SimulationConfig::default();
-        simulation_config.end_time = 5.0;
-        simulation_config.time_step = 0.1; // Start at 0.1s (50 steps) instead of 1.0s (5 steps)
+        let mut simulation_config = SimulationConfig {
+            end_time: 5.0,
+            time_step: 0.1, // Start at 0.1s (50 steps) instead of 1.0s (5 steps)
+            ..SimulationConfig::default()
+        };
 
         let mut dist_a = start_simulation(&simulation_config, false, false)
             .car
@@ -453,8 +453,10 @@ mod tests {
 
     #[test]
     fn test_simulation_speed_increase() {
-        let mut simulation_config = SimulationConfig::default();
-        simulation_config.end_time = 1.0;
+        let mut simulation_config = SimulationConfig {
+            end_time: 1.0,
+            ..SimulationConfig::default()
+        };
         // This test checks the time stepping only, so load transfer is switched off (CoG on the
         // ground reduces the model to static axle loads). With load transfer, the first step of a
         // 0.5 s+ time step uses a lagged acceleration of 0 and misses the rear load gain the
@@ -573,7 +575,8 @@ mod tests {
     #[test]
     fn test_validate_rejects_bad_configs() {
         // Each case breaks exactly one value of an otherwise valid config
-        let cases: Vec<(&str, fn(&mut SimulationConfig))> = vec![
+        type BreakConfig = fn(&mut SimulationConfig);
+        let cases: Vec<(&str, BreakConfig)> = vec![
             ("front_bias < 0", |c| c.car.brakes.front_bias = -0.1),
             ("front_bias > 1", |c| c.car.brakes.front_bias = 1.1),
             ("front_bias NaN", |c| c.car.brakes.front_bias = f64::NAN),
@@ -632,10 +635,12 @@ mod tests {
 
     #[test]
     fn test_calculate_total_steps() {
-        let mut simulation_config = SimulationConfig::default();
+        let mut simulation_config = SimulationConfig {
+            end_time: 5.0,
+            time_step: 0.1 / 25.0,
+            ..SimulationConfig::default()
+        };
 
-        simulation_config.end_time = 5.0;
-        simulation_config.time_step = 0.1 / 25.0;
         // Accumulating 0.004 s in a loop gives 1251 steps, expected exactly 5.0 / 0.004 = 1250
         assert_eq!(calculate_total_steps(&simulation_config), 1250);
 

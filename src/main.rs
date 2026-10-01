@@ -5,8 +5,10 @@ use physics::simulation::{SimulationConfig, start_simulation};
 
 fn main() {
     // 1. Load default config (or tweak specific values)
-    let mut config = SimulationConfig::default();
-    config.end_time = 100000.0;
+    let config = SimulationConfig {
+        end_time: 100000.0,
+        ..SimulationConfig::default()
+    };
 
     println!("Launching vehicle dynamics simulation...");
 
