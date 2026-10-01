@@ -1,22 +1,13 @@
-use crate::physics::Mass;
-use crate::physics::forces::calculate_normal_force;
+use crate::physics::loads::AxleLoads;
 
-pub(crate) fn calculate_brake_force(
-    mass: &Mass,
-    mu_static: f64,
-    g_acceleration: f64,
-) -> f64 {
-    let front_axle_normal_force =
-        calculate_normal_force(mass.front, g_acceleration);
-    let rear_axle_normal_force =
-        calculate_normal_force(mass.rear, g_acceleration);
-
-    front_axle_normal_force * mu_static + rear_axle_normal_force * mu_static
+pub(crate) fn calculate_brake_force(axle_loads: &AxleLoads, mu_static: f64) -> f64 {
+    axle_loads.front * mu_static + axle_loads.rear * mu_static
 }
 
 #[cfg(test)]
 mod tests {
     use crate::physics::braking::calculate_brake_force;
+    use crate::physics::loads::calculate_static_axle_loads;
     use crate::physics::{Car, Environment, Tyre};
 
     #[test]
@@ -25,11 +16,9 @@ mod tests {
         let tyre = Tyre::default();
         let environment = Environment::default();
 
-        let brake_force = calculate_brake_force(
-            &car.mass,
-            tyre.mu_static,
-            environment.g_acceleration,
-        );
+        let axle_loads = calculate_static_axle_loads(&car.mass, environment.g_acceleration);
+
+        let brake_force = calculate_brake_force(&axle_loads, tyre.mu_static);
 
         // brake force = 407.747196738 * 9.81 * 0.9 + 407.747196738 * 9.81 * 0.9 = 7200 N
         assert!(

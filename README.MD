@@ -22,7 +22,7 @@ Every cycle (`simulation_step`) executes in this order:
 
 1. **Track State Update:** Resolve `active_braking_zone` via `find_active_braking_zone()` and evaluate if the car is currently in a braking region using `is_braking_zone()`.
 2. **Powertrain State Update:** Recalculate input engine revs (`calculate_transmission_input_revs`) and select optimal gear (`select_best_gear`).
-3. **Net Force Evaluation (`calculate_net_force`):**
+3. **Net Force Evaluation (`calculate_net_force(car, environment, car_state)`):** Compute static axle normal forces once (`calculate_static_axle_loads` → `AxleLoads`); the rear axle is treated as the driven axle, and `AxleLoads::total()` feeds rolling/breakaway friction and brake force.
     * **If Braking:** Sum all resistive losses (rolling friction + air drag + brake force). If car speed is 0 m/s, net force is set to 0 N; otherwise net force equals `-force_losses`.
     * **If Accelerating:** Calculate powertrain force (minimum of torque limit and power limit), limit by tyre static friction limit (`calculate_force_static_friction`), and subtract rolling friction and air drag losses.
 4. **Acceleration:** Calculate vehicle acceleration by dividing net force by total mass (`calculate_acceleration`).
