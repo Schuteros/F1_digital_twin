@@ -3,7 +3,9 @@ use crate::physics::environment::Environment;
 use crate::physics::forces::{calculate_acceleration, calculate_net_force};
 use crate::physics::integrators::euler;
 use crate::physics::loads::calculate_axle_loads;
-use crate::physics::powertrain::{calculate_transmission_input_revs, select_best_gear};
+use crate::physics::powertrain::{
+    Drivetrain, calculate_transmission_input_revs, select_best_gear,
+};
 use crate::physics::states::CarState;
 use crate::physics::track::{Track, find_active_braking_zone, is_braking_zone};
 
@@ -56,6 +58,57 @@ impl Default for SimulationConfig {
             end_time: 1.0,
             time_step: 0.001,
         }
+    }
+}
+
+/// Allowed difference between mass.front + mass.rear and mass.total in kilograms, kg
+const MASS_SUM_TOLERANCE: f64 = 1e-6;
+
+impl SimulationConfig {
+    /// Checks the config for values the physics model can't handle.
+    /// Returns a message describing the first invalid value found.
+    pub fn validate(&self) -> Result<(), String> {
+        let front_bias = self.car.brakes.front_bias;
+        if !(0.0..=1.0).contains(&front_bias) {
+            return Err(format!(
+                "brakes.front_bias must be in 0.0..=1.0, got {}",
+                front_bias
+            ));
+        }
+
+        if let Drivetrain::AllWheelDrive { front_torque_split } = self.car.powertrain.drivetrain
+            && !(0.0..=1.0).contains(&front_torque_split)
+        {
+            return Err(format!(
+                "AllWheelDrive front_torque_split must be in 0.0..=1.0, got {}",
+                front_torque_split
+            ));
+        }
+
+        let wheelbase = self.car.geometry.wheelbase;
+        if !wheelbase.is_finite() || wheelbase <= 0.0 {
+            return Err(format!("geometry.wheelbase must be > 0 m, got {}", wheelbase));
+        }
+
+        let cog_height = self.car.geometry.cog_height;
+        if !cog_height.is_finite() || cog_height < 0.0 {
+            return Err(format!("geometry.cog_height must be >= 0 m, got {}", cog_height));
+        }
+
+        if !self.time_step.is_finite() || self.time_step <= 0.0 {
+            return Err(format!("time_step must be > 0 s, got {}", self.time_step));
+        }
+
+        let mass = &self.car.mass;
+        let mass_difference = (mass.front + mass.rear - mass.total).abs();
+        if mass_difference.is_nan() || mass_difference > MASS_SUM_TOLERANCE {
+            return Err(format!(
+                "mass.front + mass.rear must equal mass.total, got {} + {} != {}",
+                mass.front, mass.rear, mass.total
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -192,6 +245,12 @@ pub fn start_simulation(
     telemetry: bool,
     verbose: bool,
 ) -> SimulationState {
+    // An invalid config is a setup error, not a runtime condition, so fail loudly.
+    // Callers who want to handle it gracefully can call `validate()` themselves first.
+    if let Err(message) = simulation_config.validate() {
+        panic!("Invalid simulation config: {}", message);
+    }
+
     let mut simulation_state = SimulationState::new(simulation_config);
 
     if verbose {
@@ -233,6 +292,7 @@ mod tests {
         SimulationConfig, SimulationState, calculate_total_steps, get_car_acceleration,
         get_car_distance, get_car_speed, simulation_step, start_simulation,
     };
+    use crate::physics::powertrain::Drivetrain;
 
     #[test]
     fn test_get_car_acceleration() {
@@ -442,6 +502,71 @@ mod tests {
         assert_eq!(end_state.car.speed, 0.0);
         // Stopped car is no longer decelerating
         assert_eq!(end_state.car.acceleration, 0.0);
+    }
+
+    #[test]
+    fn test_validate_accepts_default() {
+        assert_eq!(SimulationConfig::default().validate(), Ok(()));
+    }
+
+    #[test]
+    fn test_validate_rejects_bad_configs() {
+        // Each case breaks exactly one value of an otherwise valid config
+        let cases: Vec<(&str, fn(&mut SimulationConfig))> = vec![
+            ("front_bias < 0", |c| c.car.brakes.front_bias = -0.1),
+            ("front_bias > 1", |c| c.car.brakes.front_bias = 1.1),
+            ("front_bias NaN", |c| c.car.brakes.front_bias = f64::NAN),
+            ("AWD split < 0", |c| {
+                c.car.powertrain.drivetrain = Drivetrain::AllWheelDrive {
+                    front_torque_split: -0.2,
+                }
+            }),
+            ("AWD split > 1", |c| {
+                c.car.powertrain.drivetrain = Drivetrain::AllWheelDrive {
+                    front_torque_split: 1.5,
+                }
+            }),
+            ("wheelbase = 0", |c| c.car.geometry.wheelbase = 0.0),
+            ("wheelbase < 0", |c| c.car.geometry.wheelbase = -3.4),
+            ("cog_height < 0", |c| c.car.geometry.cog_height = -0.1),
+            ("time_step = 0", |c| c.time_step = 0.0),
+            ("time_step < 0", |c| c.time_step = -0.001),
+            ("front + rear != total", |c| c.car.mass.front += 10.0),
+        ];
+
+        for (name, break_config) in cases {
+            let mut simulation_config = SimulationConfig::default();
+            break_config(&mut simulation_config);
+
+            assert!(
+                simulation_config.validate().is_err(),
+                "validate() accepted bad config: {}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_accepts_edge_values() {
+        let mut simulation_config = SimulationConfig::default();
+        // Bias and split edges are valid: all braking / drive on one axle
+        simulation_config.car.brakes.front_bias = 1.0;
+        simulation_config.car.powertrain.drivetrain = Drivetrain::AllWheelDrive {
+            front_torque_split: 0.0,
+        };
+        // CoG on the ground is valid: no load transfer
+        simulation_config.car.geometry.cog_height = 0.0;
+
+        assert_eq!(simulation_config.validate(), Ok(()));
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid simulation config")]
+    fn test_start_simulation_panics_on_invalid_config() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.car.geometry.wheelbase = 0.0;
+
+        start_simulation(&simulation_config, false, false);
     }
 
     #[test]
