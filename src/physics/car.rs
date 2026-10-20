@@ -2,6 +2,7 @@
 
 use crate::physics::aero::Aero;
 use crate::physics::braking::Brakes;
+use crate::physics::chassis::Suspension;
 use crate::physics::powertrain::Powertrain;
 use crate::physics::tyres::Tyre;
 
@@ -19,11 +20,14 @@ pub struct Car {
     /// Defines the aerodynamic model of the car
     pub aero: Aero,
 
-    /// Defines the chassis geometry used for longitudinal load transfer
+    /// Defines the chassis geometry used for load transfer and the suspension model
     pub geometry: ChassisGeometry,
 
     /// Defines the brake system of the car
     pub brakes: Brakes,
+
+    /// Defines the suspension (springs, dampers, end stops and pitch inertia) of the car
+    pub suspension: Suspension,
 }
 
 /// Contains mass distribution data
@@ -36,7 +40,7 @@ pub struct Mass {
     pub front: f64,
 }
 
-/// Chassis dimensions needed for longitudinal load transfer.
+/// Chassis dimensions needed for longitudinal load transfer and the suspension model.
 ///
 /// CoG to axle distances (l_f, l_r) are not stored here: they follow from the
 /// front/rear split in `Mass`, so the static weight distribution has one source of truth.
@@ -73,6 +77,7 @@ impl Default for Car {
             aero: Aero::default(),
             geometry: ChassisGeometry::default(),
             brakes: Brakes::default(),
+            suspension: Suspension::default(),
         }
     }
 }

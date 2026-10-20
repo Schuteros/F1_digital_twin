@@ -1,6 +1,7 @@
 mod aero;
 pub mod braking;
 mod car;
+mod chassis;
 mod environment;
 mod forces;
 mod integrators;
@@ -8,5 +9,5 @@ mod loads;
 mod powertrain;
 pub(crate) mod simulation;
 mod states;
-mod tyres;
 pub mod track;
+mod tyres;

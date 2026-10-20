@@ -58,8 +58,8 @@ pub fn calculate_normal_force(mass: f64, g_acceleration: f64) -> f64 {
 
 /// Calculates the net longitudinal force on the car in Newtons, N, positive forward.
 ///
-/// `axle_loads` are the axle normal forces for this step; in the simulation they are built
-/// from the previous step's acceleration (lagged load transfer, docs/10 section 10.6).
+/// `axle_loads` are the axle normal forces for this step; in the simulation they are the
+/// corner tyre loads from the suspension state (docs/11 section 11.8).
 pub fn calculate_net_force(
     car: &Car,
     environment: &Environment,

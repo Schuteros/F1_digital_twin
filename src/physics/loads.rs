@@ -36,6 +36,10 @@ pub(crate) fn calculate_static_axle_loads(mass: &Mass, g_acceleration: f64) -> A
 ///
 /// The front load is clamped to [0, total weight] so no axle is ever pulled off the ground
 /// with a negative load, and the rear load is the remainder, so front + rear = m * g always.
+///
+/// The simulation now gets its axle loads from the suspension (docs/11). This is kept as the
+/// steady-state reference that the suspension must settle to (docs/11 section 11.6).
+#[allow(dead_code)] // Only used by tests as the steady-state reference
 pub(crate) fn calculate_axle_loads(
     mass: &Mass,
     geometry: &ChassisGeometry,

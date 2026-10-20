@@ -1,8 +1,11 @@
 use crate::physics::car::Car;
+use crate::physics::chassis::{
+    calculate_body_accelerations_from_state, calculate_tyre_loads, sum_axle_loads,
+    update_suspension_positions, update_suspension_velocities,
+};
 use crate::physics::environment::Environment;
 use crate::physics::forces::{calculate_acceleration, calculate_net_force};
 use crate::physics::integrators::euler;
-use crate::physics::loads::calculate_axle_loads;
 use crate::physics::powertrain::{Drivetrain, calculate_transmission_input_revs, select_best_gear};
 use crate::physics::states::CarState;
 use crate::physics::track::{Track, find_active_braking_zone, is_braking_zone};
@@ -127,16 +130,12 @@ impl SimulationState {
 
 /// Calculates car acceleration in m/s^2 given the current car model, state, and environment.
 ///
-/// Axle loads are built from `car_state.acceleration`, the acceleration of the previous step
-/// (lagged load transfer, docs/10 section 10.6), which breaks the circular dependency between
+/// Axle loads are the corner tyre loads from the suspension state at the start of the step
+/// (docs/11 section 11.8, steps 1 to 4), so there is no circular dependency between
 /// acceleration and load transfer.
 pub fn get_car_acceleration(car: &Car, car_state: &CarState, environment: &Environment) -> f64 {
-    let axle_loads = calculate_axle_loads(
-        &car.mass,
-        &car.geometry,
-        environment.g_acceleration,
-        car_state.acceleration,
-    );
+    let tyre_loads = calculate_tyre_loads(car, &car_state.suspension, environment.g_acceleration);
+    let axle_loads = sum_axle_loads(&tyre_loads);
     let force = calculate_net_force(car, environment, car_state, &axle_loads);
 
     calculate_acceleration(force, car.mass.total)
@@ -204,14 +203,22 @@ fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &S
         simulation_state.car.gear,
     );
 
-    // Acceleration is computed once per step from the previous step's acceleration (load
-    // transfer), then stored so the next step can use it.
+    // docs/11 section 11.8, steps 1 to 4: tyre loads from the suspension state, then a_x
     simulation_state.car.acceleration = get_car_acceleration(
         &simulation_config.car,
         &simulation_state.car,
         &simulation_config.environment,
     );
 
+    // Step 5: body accelerations from the same suspension state and this step's a_x
+    let body_accelerations = calculate_body_accelerations_from_state(
+        &simulation_config.car,
+        &simulation_state.car.suspension,
+        simulation_config.environment.g_acceleration,
+        simulation_state.car.acceleration,
+    );
+
+    // Step 6: update velocities
     simulation_state.car.speed = get_car_speed(
         &simulation_state.car,
         simulation_config,
@@ -219,15 +226,28 @@ fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &S
     );
 
     if simulation_state.car.speed <= 0.0 && simulation_state.car.braking {
-        // Car has stopped: it is no longer decelerating, so no load transfer either
+        // Car has stopped: it is no longer decelerating. From the next step a_x = 0
+        // (net force is 0 at standstill), and the body settles back to static.
         simulation_state.car.speed = 0.0;
         simulation_state.car.acceleration = 0.0;
     }
 
+    simulation_state.car.suspension = update_suspension_velocities(
+        &simulation_state.car.suspension,
+        &body_accelerations,
+        simulation_config.time_step,
+    );
+
+    // Step 7: update positions with the new velocities (semi-implicit Euler)
     simulation_state.car.distance = get_car_distance(
         &simulation_state.car,
         simulation_config,
         simulation_state.car.speed,
+    );
+
+    simulation_state.car.suspension = update_suspension_positions(
+        &simulation_state.car.suspension,
+        simulation_config.time_step,
     );
 
     simulation_state.time += simulation_config.time_step;
@@ -282,6 +302,7 @@ pub fn start_simulation(
 
 #[cfg(test)]
 mod tests {
+    use crate::physics::chassis::{SuspensionState, calculate_tyre_loads, sum_axle_loads};
     use crate::physics::powertrain::Drivetrain;
     use crate::physics::simulation::{
         SimulationConfig, SimulationState, calculate_total_steps, get_car_acceleration,
@@ -309,42 +330,51 @@ mod tests {
     }
 
     #[test]
-    fn test_get_car_acceleration_uses_stored_acceleration() {
+    fn test_get_car_acceleration_uses_suspension_state() {
         let mut simulation_config = SimulationConfig::default();
         // 1st gear at 10 m/s: powertrain force = min(800_000 / 10, 800 * 3 * 1.5 / 0.36) = 10000 N,
         // so the rear (driven) axle grip is the limit
         simulation_config.initial_car.gear = 1;
 
-        let acceleration_without_transfer = get_car_acceleration(
+        let acceleration_static = get_car_acceleration(
             &simulation_config.car,
             &simulation_config.initial_car,
             &simulation_config.environment,
         );
 
-        // Previous acceleration 0 m/s^2 -> static rear load 4000 N -> traction 0.9 * 4000 N = 3600 N
+        // Suspension at static -> static rear load 4000 N -> traction 0.9 * 4000 N = 3600 N
         // Net force = 3600 N - 282.875 N = 3317.125 N
         // Acceleration = 3317.125 N / 815.494393476 kg = 4.067623 m/s^2
         assert!(
-            (acceleration_without_transfer - 4.067623).abs() < 1e-3,
+            (acceleration_static - 4.067623).abs() < 1e-3,
             "Calculated value: {}",
-            acceleration_without_transfer
+            acceleration_static
         );
 
+        // The stored acceleration is an output only, it no longer moves load (no lag)
         simulation_config.initial_car.acceleration = 5.0;
-        let acceleration_with_transfer = get_car_acceleration(
+        let acceleration_with_stored = get_car_acceleration(
             &simulation_config.car,
             &simulation_config.initial_car,
             &simulation_config.environment,
         );
+        assert_eq!(acceleration_with_stored, acceleration_static);
 
-        // Previous acceleration 5 m/s^2 -> load transfer = 815.494393476 kg * 5 m/s^2 * 0.3 m / 3.4 m = 359.7769 N
-        // Rear load = 4000 N + 359.7769 N = 4359.7769 N -> traction = 0.9 * 4359.7769 N = 3923.7992 N
-        // Net force = 3923.7992 N - 282.875 N = 3640.9242 N
-        // Acceleration = 3640.9242 N / 815.494393476 kg = 4.464749 m/s^2
+        // Nose up (squat) by 1 mrad: s_r = 0 - 1.7 m * (-0.001) = +1.7 mm per rear corner
+        // Rear corner force = 130 000 N/m * 0.0017 m = 221 N -> rear load = 4000 N + 2 * 221 N = 4442 N
+        // Traction = 0.9 * 4442 N = 3997.8 N, front + rear stays 8000 N so the losses stay 282.875 N
+        // Net force = 3997.8 N - 282.875 N = 3714.925 N
+        // Acceleration = 3714.925 N / 815.494393476 kg = 4.555423 m/s^2
+        simulation_config.initial_car.suspension.pitch = -0.001;
+        let acceleration_squat = get_car_acceleration(
+            &simulation_config.car,
+            &simulation_config.initial_car,
+            &simulation_config.environment,
+        );
         assert!(
-            (acceleration_with_transfer - 4.464749).abs() < 1e-3,
+            (acceleration_squat - 4.555423).abs() < 1e-3,
             "Calculated value: {}",
-            acceleration_with_transfer
+            acceleration_squat
         );
     }
 
@@ -413,7 +443,9 @@ mod tests {
     fn test_simulation_convergence() {
         let mut simulation_config = SimulationConfig {
             end_time: 5.0,
-            time_step: 0.1, // Start at 0.1s (50 steps) instead of 1.0s (5 steps)
+            // Start at 0.01 s (500 steps): 0.1 s and 0.02 s break the suspension stability limit
+            // (omega_max = 114 rad/s with the bump stops, docs/11 section 11.8)
+            time_step: 0.01,
             ..SimulationConfig::default()
         };
 
@@ -453,9 +485,7 @@ mod tests {
             ..SimulationConfig::default()
         };
         // This test checks the time stepping only, so load transfer is switched off (CoG on the
-        // ground reduces the model to static axle loads). With load transfer, the first step of a
-        // 0.5 s+ time step uses a lagged acceleration of 0 and misses the rear load gain the
-        // 1 ms run gets, so the coarse run ends slower (the lag error from docs/10 section 10.6).
+        // ground: no pitch moment, the suspension stays at static and the axle loads are static).
         simulation_config.car.geometry.cog_height = 0.0;
 
         let mut speed_slower = start_simulation(&simulation_config, false, false).car.speed;
@@ -613,6 +643,80 @@ mod tests {
         simulation_config.car.geometry.cog_height = 0.0;
 
         assert_eq!(simulation_config.validate(), Ok(()));
+    }
+
+    #[test]
+    fn test_braking_dives_and_settles_after_stop() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.track.braking_zones = vec![(0.0, 1000.0)];
+        let g_acceleration = simulation_config.environment.g_acceleration;
+
+        let mut simulation_state = SimulationState::new(&simulation_config);
+
+        // Brake for 0.3 s: about two pitch periods, mostly settled (zeta = 0.75)
+        for _ in 0..300 {
+            simulation_step(&mut simulation_state, &simulation_config);
+        }
+        let suspension = simulation_state.car.suspension;
+        let loads = sum_axle_loads(&calculate_tyre_loads(
+            &simulation_config.car,
+            &suspension,
+            g_acceleration,
+        ));
+        // Nose down and load moved to the front. The total stays m * g = 8000 N: the symmetric
+        // car keeps heave at exactly 0, so F_f = -F_r (1e-6 N covers rounding)
+        assert!(suspension.pitch > 0.0);
+        assert!(loads.front > 4000.0 + 500.0, "{:?}", loads);
+        assert!((loads.total() - 8000.0).abs() < 1e-6, "{:?}", loads);
+
+        // Brake until stopped
+        let mut steps = 0;
+        while !(simulation_state.car.braking && simulation_state.car.speed == 0.0) {
+            simulation_step(&mut simulation_state, &simulation_config);
+            steps += 1;
+            assert!(steps < 20_000, "Car never stopped");
+        }
+        assert!(simulation_state.car.suspension.pitch > 0.0);
+
+        // Stopped: a_x = 0, the body keeps integrating and settles back to static.
+        // 3 s: decay exp(-0.7455 * 38.77 * 3) = exp(-87), so only rounding is left
+        for _ in 0..3_000 {
+            simulation_step(&mut simulation_state, &simulation_config);
+            assert_eq!(simulation_state.car.acceleration, 0.0);
+            assert_eq!(simulation_state.car.speed, 0.0);
+        }
+        let suspension = simulation_state.car.suspension;
+        assert!(suspension.pitch.abs() < 1e-12, "{:?}", suspension);
+        assert!(suspension.pitch_rate.abs() < 1e-12, "{:?}", suspension);
+        assert!(suspension.heave.abs() < 1e-12, "{:?}", suspension);
+        let loads = sum_axle_loads(&calculate_tyre_loads(
+            &simulation_config.car,
+            &suspension,
+            g_acceleration,
+        ));
+        assert!((loads.front - 4000.0).abs() < 1e-6);
+        assert!((loads.rear - 4000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_acceleration_squats() {
+        // Accelerating from 10 m/s in 1st gear: load moves to the rear, nose up
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.initial_car.gear = 1;
+        let mut simulation_state = SimulationState::new(&simulation_config);
+        assert_eq!(simulation_state.car.suspension, SuspensionState::default());
+
+        for _ in 0..300 {
+            simulation_step(&mut simulation_state, &simulation_config);
+        }
+
+        let loads = sum_axle_loads(&calculate_tyre_loads(
+            &simulation_config.car,
+            &simulation_state.car.suspension,
+            simulation_config.environment.g_acceleration,
+        ));
+        assert!(simulation_state.car.suspension.pitch < 0.0);
+        assert!(loads.rear > loads.front, "{:?}", loads);
     }
 
     #[test]
