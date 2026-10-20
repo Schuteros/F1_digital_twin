@@ -113,6 +113,11 @@ static weight distribution.
 
 ## 10.6. Implementation in the Simulation Lifecycle
 
+> **Note:** The simulation no longer uses this section. Dynamic load transfer through the
+> suspension is now described in docs/11 (section 11.8), and the lagged acceleration below is
+> gone. `calculate_axle_loads` is kept as the steady-state reference that the suspension
+> settles to (docs/11, section 11.6).
+
 Load transfer depends on $a_x$, but $a_x$ depends on the axle forces, which depend on load
 transfer. To break this circular dependency, the simulation uses the **acceleration from the
 previous time step**, stored in `CarState`:
@@ -178,6 +183,10 @@ $4.41$ m/s² without load transfer.
 ---
 
 ## 10.8. Architectural Notes and Real-World Limitations
+
+> **Note:** The pitch dynamics and the removal of the one-step acceleration lag mentioned
+> below are now implemented in docs/11. The limitations of the suspension model are listed in
+> docs/11, section 11.9.
 
 [!WARNING]
 This is a steady-state, rigid-body load transfer model. It assumes the load transfer reaches
