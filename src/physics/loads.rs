@@ -110,7 +110,9 @@ mod tests {
 
         // Total weight = 1000 kg * 9.81 m/s^2 = 9810 N, for any acceleration.
         // +-100 m/s^2 go past the clamp in both directions (one axle fully unloaded).
-        for acceleration in [-100.0, -50.0, -9.81, -5.0, -0.1, 0.0, 0.1, 5.0, 9.81, 50.0, 100.0] {
+        for acceleration in [
+            -100.0, -50.0, -9.81, -5.0, -0.1, 0.0, 0.1, 5.0, 9.81, 50.0, 100.0,
+        ] {
             let axle_loads = calculate_axle_loads(&mass, &geometry, g_acceleration, acceleration);
 
             assert!(

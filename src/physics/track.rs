@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn test_is_braking_zone() {
         let track = Track {
-            length: 1000.0,                                                // m
+            length: 1000.0,                                                      // m
             braking_zones: vec![(200.0, 300.0), (300.0, 400.0), (450.0, 500.0)], // [(m, m)],
         };
 

@@ -110,17 +110,11 @@ pub(crate) fn calculate_transmission_input_revs(
 }
 
 /// Selects needed gear in locked clutch
-pub(crate) fn select_best_gear(
-    powertrain: &Powertrain,
-    revs_hz: f64,
-    gear: u8,
-) -> u8 {
+pub(crate) fn select_best_gear(powertrain: &Powertrain, revs_hz: f64, gear: u8) -> u8 {
     let max_gears = powertrain.gear_ratios.len() as u8;
 
-    let near_redline =
-        (powertrain.max_revs - revs_hz) < powertrain.shift_up_margin;
-    let near_stall =
-        (revs_hz - powertrain.min_revs) < powertrain.shift_down_margin;
+    let near_redline = (powertrain.max_revs - revs_hz) < powertrain.shift_up_margin;
+    let near_stall = (revs_hz - powertrain.min_revs) < powertrain.shift_down_margin;
 
     if near_redline && gear < max_gears {
         gear + 1
@@ -158,10 +152,8 @@ pub(crate) fn calculate_force_output_shaft_power_limited(
     wheel_radius: f64,
     car_state: &CarState,
 ) -> f64 {
-    let output_shaft_revs =
-        calculate_transmission_input_revs(powertrain, wheel_radius, car_state);
-    let output_shaft_power =
-        calculate_output_shaft_power(powertrain.max_torque, output_shaft_revs);
+    let output_shaft_revs = calculate_transmission_input_revs(powertrain, wheel_radius, car_state);
+    let output_shaft_power = calculate_output_shaft_power(powertrain.max_torque, output_shaft_revs);
 
     calculate_force_power_limited(output_shaft_power, car_state.speed)
 }
@@ -190,8 +182,7 @@ pub(crate) fn calculate_force_from_powertrain(
         force_torque_limited
     } else {
         // LOCKED REGIME: Capped by the engine's power limit (P / v) as speed builds
-        let force_power_limited =
-            calculate_force_power_limited(powertrain.power, car_state.speed);
+        let force_power_limited = calculate_force_power_limited(powertrain.power, car_state.speed);
         force_power_limited.min(force_torque_limited)
     }
 }
@@ -205,8 +196,7 @@ mod tests {
         let powertrain = Powertrain::default();
         let gear: u8 = 4;
 
-        let force =
-            calculate_force_max_torque_limited(&powertrain, wheel_radius, gear);
+        let force = calculate_force_max_torque_limited(&powertrain, wheel_radius, gear);
 
         // Expected: 800 * 0.8 * 1.5 / 0.36 =  2666.6667 N
         assert!(
@@ -239,8 +229,7 @@ mod tests {
             ..CarState::default()
         };
 
-        let force: f64 =
-            calculate_force_from_powertrain(&powertrain, wheel_radius, &car_state);
+        let force: f64 = calculate_force_from_powertrain(&powertrain, wheel_radius, &car_state);
 
         // Expected: 800 * 3 * 1.5 / 0.36 = 10000 N as the Force limited by power goes to infinity when the car is standstill
         assert!(
@@ -258,8 +247,7 @@ mod tests {
         };
         let wheel_radius: f64 = 0.36; // meters (m)
 
-        let force: f64 =
-            calculate_force_from_powertrain(&powertrain, wheel_radius, &car_state);
+        let force: f64 = calculate_force_from_powertrain(&powertrain, wheel_radius, &car_state);
 
         // Force limited by max torque: 800 * 0.8 * 1.5 / 0.36 =  2666,66667 N
         // Force limited by power: 800_000 / 10 = 80000.0000 N

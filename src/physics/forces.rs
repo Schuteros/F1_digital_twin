@@ -172,14 +172,20 @@ mod tests {
 
         // RWD: 0.9 * 3000 N = 2700 N
         let force = calculate_powertrain_force_tyre_traction_limited(
-            &axle_loads, &car_state, &powertrain, &tyre,
+            &axle_loads,
+            &car_state,
+            &powertrain,
+            &tyre,
         );
         assert!((force - 2700.0).abs() < 1e-9, "RWD force: {}", force);
 
         // FWD: 0.9 * 5000 N = 4500 N
         powertrain.drivetrain = Drivetrain::FrontWheelDrive;
         let force = calculate_powertrain_force_tyre_traction_limited(
-            &axle_loads, &car_state, &powertrain, &tyre,
+            &axle_loads,
+            &car_state,
+            &powertrain,
+            &tyre,
         );
         assert!((force - 4500.0).abs() < 1e-9, "FWD force: {}", force);
 
@@ -188,7 +194,10 @@ mod tests {
             front_torque_split: 0.6,
         };
         let force = calculate_powertrain_force_tyre_traction_limited(
-            &axle_loads, &car_state, &powertrain, &tyre,
+            &axle_loads,
+            &car_state,
+            &powertrain,
+            &tyre,
         );
         assert!((force - 6750.0).abs() < 1e-9, "AWD force: {}", force);
     }

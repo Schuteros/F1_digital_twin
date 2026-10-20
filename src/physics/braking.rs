@@ -21,7 +21,11 @@ impl Default for Brakes {
 
 /// Calculates the total braking force in Newtons, N, for threshold braking with a fixed bias:
 /// the brakes are applied until the first axle reaches its traction limit mu * Fz_axle.
-pub(crate) fn calculate_brake_force(axle_loads: &AxleLoads, mu_static: f64, front_bias: f64) -> f64 {
+pub(crate) fn calculate_brake_force(
+    axle_loads: &AxleLoads,
+    mu_static: f64,
+    front_bias: f64,
+) -> f64 {
     calculate_split_force_limit(axle_loads, mu_static, front_bias)
 }
 

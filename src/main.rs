@@ -1,7 +1,7 @@
 pub mod physics;
 
-use std::time::Instant;
 use physics::simulation::{SimulationConfig, start_simulation};
+use std::time::Instant;
 
 fn main() {
     // 1. Load default config (or tweak specific values)
@@ -23,8 +23,5 @@ fn main() {
     println!("\nSimulation Complete!");
     println!("Final Time    : {:.3} s", final_state.time);
     println!("Final Speed   : {:.2} m/s", final_state.car.speed);
-    println!(
-        "Final Distance: {:.2} m",
-        final_state.car.distance
-    );
+    println!("Final Distance: {:.2} m", final_state.car.distance);
 }

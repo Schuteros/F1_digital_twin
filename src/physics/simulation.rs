@@ -3,9 +3,7 @@ use crate::physics::environment::Environment;
 use crate::physics::forces::{calculate_acceleration, calculate_net_force};
 use crate::physics::integrators::euler;
 use crate::physics::loads::calculate_axle_loads;
-use crate::physics::powertrain::{
-    Drivetrain, calculate_transmission_input_revs, select_best_gear,
-};
+use crate::physics::powertrain::{Drivetrain, calculate_transmission_input_revs, select_best_gear};
 use crate::physics::states::CarState;
 use crate::physics::track::{Track, find_active_braking_zone, is_braking_zone};
 
@@ -87,12 +85,18 @@ impl SimulationConfig {
 
         let wheelbase = self.car.geometry.wheelbase;
         if !wheelbase.is_finite() || wheelbase <= 0.0 {
-            return Err(format!("geometry.wheelbase must be > 0 m, got {}", wheelbase));
+            return Err(format!(
+                "geometry.wheelbase must be > 0 m, got {}",
+                wheelbase
+            ));
         }
 
         let cog_height = self.car.geometry.cog_height;
         if !cog_height.is_finite() || cog_height < 0.0 {
-            return Err(format!("geometry.cog_height must be >= 0 m, got {}", cog_height));
+            return Err(format!(
+                "geometry.cog_height must be >= 0 m, got {}",
+                cog_height
+            ));
         }
 
         if !self.time_step.is_finite() || self.time_step <= 0.0 {
@@ -126,11 +130,7 @@ impl SimulationState {
 /// Axle loads are built from `car_state.acceleration`, the acceleration of the previous step
 /// (lagged load transfer, docs/10 section 10.6), which breaks the circular dependency between
 /// acceleration and load transfer.
-pub fn get_car_acceleration(
-    car: &Car,
-    car_state: &CarState,
-    environment: &Environment,
-) -> f64 {
+pub fn get_car_acceleration(car: &Car, car_state: &CarState, environment: &Environment) -> f64 {
     let axle_loads = calculate_axle_loads(
         &car.mass,
         &car.geometry,
@@ -152,11 +152,7 @@ fn get_car_speed(
 }
 
 /// Calculates car distance given the current car model, state, environment model and simulation_config.
-fn get_car_distance(
-    car_state: &CarState,
-    simulation_config: &SimulationConfig,
-    speed: f64,
-) -> f64 {
+fn get_car_distance(car_state: &CarState, simulation_config: &SimulationConfig, speed: f64) -> f64 {
     euler(car_state.distance, speed, simulation_config.time_step)
 }
 
@@ -286,11 +282,11 @@ pub fn start_simulation(
 
 #[cfg(test)]
 mod tests {
+    use crate::physics::powertrain::Drivetrain;
     use crate::physics::simulation::{
         SimulationConfig, SimulationState, calculate_total_steps, get_car_acceleration,
         get_car_distance, get_car_speed, simulation_step, start_simulation,
     };
-    use crate::physics::powertrain::Drivetrain;
 
     #[test]
     fn test_get_car_acceleration() {
@@ -383,8 +379,7 @@ mod tests {
 
         let speed = 10.0029231246;
 
-        let distance =
-            get_car_distance(&simulation_state.car, &simulation_config, speed);
+        let distance = get_car_distance(&simulation_state.car, &simulation_config, speed);
 
         // From previous test results:
         // Expected value: distance = 100 + 10.0029231246 * 0.001 = 100.010002923
@@ -463,16 +458,12 @@ mod tests {
         // 1 ms run gets, so the coarse run ends slower (the lag error from docs/10 section 10.6).
         simulation_config.car.geometry.cog_height = 0.0;
 
-        let mut speed_slower = start_simulation(&simulation_config, false, false)
-            .car
-            .speed;
+        let mut speed_slower = start_simulation(&simulation_config, false, false).car.speed;
         let mut speed_faster: f64;
 
         for _ in 0..10 {
             simulation_config.time_step += 0.5;
-            speed_faster = start_simulation(&simulation_config, false, false)
-                .car
-                .speed;
+            speed_faster = start_simulation(&simulation_config, false, false).car.speed;
             assert!(speed_faster > speed_slower, "Speed didn't increase!");
             speed_slower = speed_faster;
         }
@@ -488,7 +479,7 @@ mod tests {
         let mut last_speed = simulation_state.car.speed;
 
         for _ in 0..10 {
-            simulation_step(& mut simulation_state, &simulation_config );
+            simulation_step(&mut simulation_state, &simulation_config);
             assert!(last_speed > simulation_state.car.speed);
             last_speed = simulation_state.car.speed;
         }
