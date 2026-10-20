@@ -1,6 +1,6 @@
 # F1 Digital Twin Simulator For Design Validation
 
-Physics simulation of a Formula 1 car in progress. In reality, it is not limited to just F1 cars, but any type of car with 4 wheels. Current version 0.3.0.
+Physics simulation of a Formula 1 car in progress. In reality, it is not limited to just F1 cars, but any type of car with 4 wheels. Current version 0.4.0.
 
 ---
 
@@ -8,8 +8,8 @@ Physics simulation of a Formula 1 car in progress. In reality, it is not limited
 
 * **Goal:** We are using Rust programming language code to simulate 2D motion of F1 car.
 * **Current Phase:** We have made a simulation that can simulate 1D motion acceleration with simplified models
-* **Latest Milestone (0.3.0):** Longitudinal load transfer (docs/10), brake bias with threshold braking (docs/09), selectable drivetrain (FWD / RWD / AWD split) and config validation
-* **In Progress (unreleased):** Suspension pitch and heave dynamics (docs/11): the body sits on four spring-damper corners with bump/droop stops and a wheel lift clamp, so load transfer now arrives through a transient instead of instantly
+* **Latest Milestone (0.4.0):** Suspension pitch and heave dynamics (docs/11): the body sits on four spring-damper corners with bump/droop stops and a wheel lift clamp, so load transfer now arrives through a transient instead of instantly
+* **Previous Milestone (0.3.0):** Longitudinal load transfer (docs/10), brake bias with threshold braking (docs/09), selectable drivetrain (FWD / RWD / AWD split) and config validation
  
 ---
 
