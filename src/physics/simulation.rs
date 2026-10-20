@@ -1,6 +1,7 @@
 use crate::physics::car::Car;
 use crate::physics::chassis::{
-    calculate_body_accelerations_from_state, calculate_tyre_loads, sum_axle_loads,
+    CornerSuspension, calculate_axle_distances, calculate_body_accelerations_from_state,
+    calculate_natural_frequencies, calculate_tyre_loads, sum_axle_loads,
     update_suspension_positions, update_suspension_velocities,
 };
 use crate::physics::environment::Environment;
@@ -65,6 +66,57 @@ impl Default for SimulationConfig {
 /// Allowed difference between mass.front + mass.rear and mass.total in kilograms, kg
 const MASS_SUM_TOLERANCE: f64 = 1e-6;
 
+/// Semi-implicit Euler is only stable for omega_max * time_step below this (docs/11 section 11.8)
+const STABILITY_LIMIT: f64 = 2.0;
+
+/// Checks one suspension corner. `name` is the corner's field name, used in the error message.
+fn validate_corner_suspension(name: &str, corner: &CornerSuspension) -> Result<(), String> {
+    if !corner.spring_rate.is_finite() || corner.spring_rate <= 0.0 {
+        return Err(format!(
+            "suspension.{}.spring_rate must be > 0 N/m, got {}",
+            name, corner.spring_rate
+        ));
+    }
+
+    if !corner.damping.is_finite() || corner.damping < 0.0 {
+        return Err(format!(
+            "suspension.{}.damping must be >= 0 N·s/m, got {}",
+            name, corner.damping
+        ));
+    }
+
+    for (field, gap) in [
+        ("bump_gap", corner.bump_gap),
+        ("droop_gap", corner.droop_gap),
+    ] {
+        if !gap.is_finite() || gap < 0.0 {
+            return Err(format!(
+                "suspension.{}.{} must be >= 0 m, got {}",
+                name, field, gap
+            ));
+        }
+    }
+
+    for (field, rate) in [
+        ("bump_rate", corner.bump_rate),
+        ("droop_rate", corner.droop_rate),
+    ] {
+        if !rate.is_finite() || rate < 0.0 {
+            return Err(format!(
+                "suspension.{}.{} must be >= 0 N/m, got {}",
+                name, field, rate
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Stiffest wheel rate a corner can have in Newtons per meter, N/m: spring + the stiffer end stop
+fn calculate_stiffest_corner_rate(corner: &CornerSuspension) -> f64 {
+    corner.spring_rate + corner.bump_rate.max(corner.droop_rate)
+}
+
 impl SimulationConfig {
     /// Checks the config for values the physics model can't handle.
     /// Returns a message describing the first invalid value found.
@@ -112,6 +164,62 @@ impl SimulationConfig {
             return Err(format!(
                 "mass.front + mass.rear must equal mass.total, got {} + {} != {}",
                 mass.front, mass.rear, mass.total
+            ));
+        }
+
+        let suspension = &self.car.suspension;
+        for (name, corner) in [
+            ("front_left", &suspension.front_left),
+            ("front_right", &suspension.front_right),
+            ("rear_left", &suspension.rear_left),
+            ("rear_right", &suspension.rear_right),
+        ] {
+            validate_corner_suspension(name, corner)?;
+        }
+
+        if !suspension.pitch_inertia.is_finite() || suspension.pitch_inertia <= 0.0 {
+            return Err(format!(
+                "suspension.pitch_inertia must be > 0 kg·m^2, got {}",
+                suspension.pitch_inertia
+            ));
+        }
+
+        for (field, ride_height) in [
+            (
+                "static_ride_height_front",
+                suspension.static_ride_height_front,
+            ),
+            (
+                "static_ride_height_rear",
+                suspension.static_ride_height_rear,
+            ),
+        ] {
+            if !ride_height.is_finite() {
+                return Err(format!(
+                    "suspension.{} must be finite, got {}",
+                    field, ride_height
+                ));
+            }
+        }
+
+        // Time step stability (docs/11 section 11.8) with the uncoupled frequencies (11.17),
+        // using the stiffest rate of each corner (spring + end stop)
+        let distances = calculate_axle_distances(mass, &self.car.geometry);
+        let frequencies = calculate_natural_frequencies(
+            mass.total,
+            suspension.pitch_inertia,
+            &distances,
+            calculate_stiffest_corner_rate(&suspension.front_left)
+                + calculate_stiffest_corner_rate(&suspension.front_right),
+            calculate_stiffest_corner_rate(&suspension.rear_left)
+                + calculate_stiffest_corner_rate(&suspension.rear_right),
+        );
+        let frequency_max = frequencies.heave.max(frequencies.pitch);
+        let stability = frequency_max * self.time_step;
+        if stability.is_nan() || stability >= STABILITY_LIMIT {
+            return Err(format!(
+                "time_step must satisfy omega_max * time_step < {}, got {} rad/s * {} s = {}",
+                STABILITY_LIMIT, frequency_max, self.time_step, stability
             ));
         }
 
@@ -487,6 +595,19 @@ mod tests {
         // This test checks the time stepping only, so load transfer is switched off (CoG on the
         // ground: no pitch moment, the suspension stays at static and the axle loads are static).
         simulation_config.car.geometry.cog_height = 0.0;
+        // Time steps up to 5.5 s need a suspension that passes the stability limit
+        // (docs/11 section 11.8): 1 N/m springs and no end stops give
+        // omega_pitch = sqrt(4 * 1 N/m * 1.7^2 m^2 / 1000 kg·m^2) = 0.108 rad/s -> 0.59 at 5.5 s < 2
+        for corner in [
+            &mut simulation_config.car.suspension.front_left,
+            &mut simulation_config.car.suspension.front_right,
+            &mut simulation_config.car.suspension.rear_left,
+            &mut simulation_config.car.suspension.rear_right,
+        ] {
+            corner.spring_rate = 1.0;
+            corner.bump_rate = 0.0;
+            corner.droop_rate = 0.0;
+        }
 
         let mut speed_slower = start_simulation(&simulation_config, false, false).car.speed;
         let mut speed_faster: f64;
@@ -617,6 +738,52 @@ mod tests {
             ("time_step = 0", |c| c.time_step = 0.0),
             ("time_step < 0", |c| c.time_step = -0.001),
             ("front + rear != total", |c| c.car.mass.front += 10.0),
+            ("spring_rate = 0", |c| {
+                c.car.suspension.front_left.spring_rate = 0.0
+            }),
+            ("spring_rate < 0", |c| {
+                c.car.suspension.rear_right.spring_rate = -1.0
+            }),
+            ("spring_rate NaN", |c| {
+                c.car.suspension.front_right.spring_rate = f64::NAN
+            }),
+            ("damping < 0", |c| c.car.suspension.rear_left.damping = -1.0),
+            ("damping infinite", |c| {
+                c.car.suspension.rear_left.damping = f64::INFINITY
+            }),
+            ("bump_gap < 0", |c| {
+                c.car.suspension.front_left.bump_gap = -0.001
+            }),
+            ("droop_gap < 0", |c| {
+                c.car.suspension.rear_right.droop_gap = -0.001
+            }),
+            ("bump_gap NaN", |c| {
+                c.car.suspension.front_right.bump_gap = f64::NAN
+            }),
+            ("bump_rate < 0", |c| {
+                c.car.suspension.front_left.bump_rate = -1.0
+            }),
+            ("droop_rate < 0", |c| {
+                c.car.suspension.rear_left.droop_rate = -1.0
+            }),
+            ("pitch_inertia = 0", |c| {
+                c.car.suspension.pitch_inertia = 0.0
+            }),
+            ("pitch_inertia < 0", |c| {
+                c.car.suspension.pitch_inertia = -1000.0
+            }),
+            ("ride height NaN", |c| {
+                c.car.suspension.static_ride_height_front = f64::NAN
+            }),
+            ("ride height infinite", |c| {
+                c.car.suspension.static_ride_height_rear = f64::INFINITY
+            }),
+            // omega_max = 114.29 rad/s (pitch, spring + bump stop) -> dt limit = 2 / 114.29 = 17.5 ms
+            ("time_step unstable", |c| c.time_step = 0.018),
+            ("time_step unstable, stiff droop", |c| {
+                c.time_step = 0.005;
+                c.car.suspension.rear_left.droop_rate = 1e8;
+            }),
         ];
 
         for (name, break_config) in cases {
@@ -642,6 +809,34 @@ mod tests {
         // CoG on the ground is valid: no load transfer
         simulation_config.car.geometry.cog_height = 0.0;
 
+        assert_eq!(simulation_config.validate(), Ok(()));
+    }
+
+    #[test]
+    fn test_validate_names_field_and_value() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.car.suspension.rear_left.damping = -5.0;
+        assert_eq!(
+            simulation_config.validate(),
+            Err("suspension.rear_left.damping must be >= 0 N·s/m, got -5".to_string())
+        );
+
+        let simulation_config = SimulationConfig {
+            time_step: 0.02,
+            ..SimulationConfig::default()
+        };
+        let message = simulation_config.validate().unwrap_err();
+        assert!(message.starts_with("time_step must satisfy omega_max * time_step < 2"));
+        assert!(message.contains("0.02"), "{}", message);
+    }
+
+    #[test]
+    fn test_validate_accepts_stable_time_step() {
+        // Just under the limit: 2 / 114.29 rad/s = 17.5 ms
+        let simulation_config = SimulationConfig {
+            time_step: 0.017,
+            ..SimulationConfig::default()
+        };
         assert_eq!(simulation_config.validate(), Ok(()));
     }
 

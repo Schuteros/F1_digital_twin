@@ -163,7 +163,6 @@ pub(crate) struct RideHeights {
 }
 
 /// Undamped natural frequencies of the uncoupled heave and pitch modes
-#[allow(dead_code)] // Used by config validation, added next
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NaturalFrequencies {
     /// Heave natural frequency in radians per second, rad/s
@@ -492,7 +491,6 @@ pub(crate) fn update_suspension_positions(
 /// (docs/11, equation 11.17).
 ///
 /// * `axle_rate_front`, `axle_rate_rear` - axle rates (two corners each) in Newtons per meter, N/m
-#[allow(dead_code)] // Used by config validation, added next
 pub(crate) fn calculate_natural_frequencies(
     mass_total: f64,
     pitch_inertia: f64,
