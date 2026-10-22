@@ -3,21 +3,32 @@ use crate::physics::braking::calculate_brake_force;
 use crate::physics::car::Car;
 use crate::physics::environment::Environment;
 use crate::physics::loads::AxleLoads;
-use crate::physics::powertrain::{Powertrain, calculate_force_from_powertrain};
+use crate::physics::powertrain::{Powertrain, calculate_best_force};
 use crate::physics::states::CarState;
 use crate::physics::tyres::{Tyre, calculate_current_tyre_friction, calculate_split_force_limit};
 
 /// Calculates powertrain force in Newtons, N, limited by the grip of the driven axles.
 /// The powertrain force is split between the axles by the drivetrain, and the first
 /// driven axle to reach its traction limit caps the total (ideal traction control).
+///
+/// The powertrain force is the best force in the current gear (docs/12, equation 12.10),
+/// or 0 while a gear shift is in progress (docs/12 section 12.8).
 fn calculate_powertrain_force_tyre_traction_limited(
     axle_loads: &AxleLoads,
     car_state: &CarState,
     powertrain: &Powertrain,
     tyre: &Tyre,
 ) -> f64 {
-    let powertrain_force =
-        calculate_force_from_powertrain(powertrain, tyre.wheel_radius, car_state);
+    let powertrain_force = if car_state.shift_time_left > 0.0 {
+        0.0
+    } else {
+        calculate_best_force(
+            powertrain,
+            tyre.wheel_radius,
+            car_state.gear,
+            car_state.speed,
+        )
+    };
     let traction_force = calculate_split_force_limit(
         axle_loads,
         tyre.mu_static,
@@ -121,33 +132,69 @@ mod tests {
         }
     }
 
+    /// Default config with the powertrain shift tables filled (docs/12 section 12.10)
+    fn prepared_config() -> SimulationConfig {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.prepare().unwrap();
+        simulation_config
+    }
+
+    /// Default powertrain with the shift tables filled for the default tyre
+    fn prepared_powertrain() -> Powertrain {
+        prepared_config().car.powertrain
+    }
+
     #[test]
     fn test_calculate_powertrain_force_tyre_traction_limited() {
         let car_state = CarState {
             gear: 4,
             ..CarState::default()
         };
-        let powertrain = Powertrain::default();
+        let powertrain = prepared_powertrain();
 
         let tyre = Tyre::default();
+        // Heavy rear axle so the tyres are not the limit: RWD traction = 0.9 * 20000 N = 18000 N
+        let axle_loads = AxleLoads {
+            front: 4000.0,  // Newtons (N)
+            rear: 20_000.0, // Newtons (N)
+        };
 
         let powertrain_force_tyre_traction_limited =
             calculate_powertrain_force_tyre_traction_limited(
-                &default_static_axle_loads(),
+                &axle_loads,
                 &car_state,
                 &powertrain,
                 &tyre,
             );
 
-        // Car traction (RWD) = 4000 N * 0.9 = 3600 N
-        // Powertrain force power limited = 800_000 W / 10 m/s = 80000 N
-        // Powertrain force torque limited = 800 * 0.8 * 1.5 / 0.36 =  2666.6667 N
-        // As Powertrain force torque limited is smallest force and smaller than traction, then expected value: 2666.6667 N
+        // Gear 4 at 10 m/s is below its clutch lock speed (36.16 m/s), so the clutch slips:
+        // powertrain force = 375 * 2.78 * 3.0 / 0.36 = 8687.5 N (docs/12, equation 12.10)
+        // As the powertrain force is smaller than traction, expected value: 8687.5 N
+        // (1e-9 relative: rounding only)
         assert!(
-            (powertrain_force_tyre_traction_limited - 2666.6667).abs() < 1e-3,
-            "Expected force: 2666.6667 Calculated force: {}",
+            (powertrain_force_tyre_traction_limited - 8687.5).abs() < 1e-9 * 8687.5,
+            "Expected force: 8687.5 Calculated force: {}",
             powertrain_force_tyre_traction_limited
         );
+    }
+
+    #[test]
+    fn test_powertrain_force_zero_while_shifting() {
+        let car_state = CarState {
+            gear: 4,
+            shift_time_left: 0.003,
+            ..CarState::default()
+        };
+
+        let force = calculate_powertrain_force_tyre_traction_limited(
+            &default_static_axle_loads(),
+            &car_state,
+            &prepared_powertrain(),
+            &Tyre::default(),
+        );
+
+        // No torque reaches the wheels during a shift (docs/12 section 12.8)
+        assert_eq!(force, 0.0);
     }
 
     #[test]
@@ -164,11 +211,11 @@ mod tests {
         };
         let mut powertrain = Powertrain {
             drivetrain: Drivetrain::RearWheelDrive,
-            ..Powertrain::default()
+            ..prepared_powertrain()
         };
 
-        // Powertrain force at standstill in 1st gear = 800 * 3 * 1.5 / 0.36 = 10000 N,
-        // so in every case below the tyres are the limit
+        // Powertrain force at standstill in 1st gear (clutch slipping, docs/12 equation 12.10)
+        // = 375 * 5.43 * 3.0 / 0.36 = 16968.75 N, so in every case below the tyres are the limit
 
         // RWD: 0.9 * 3000 N = 2700 N
         let force = calculate_powertrain_force_tyre_traction_limited(
@@ -238,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_calculate_net_force() {
-        let mut simulation_config = SimulationConfig::default();
+        let mut simulation_config = prepared_config();
 
         simulation_config.initial_car.gear = 4;
 
@@ -249,12 +296,13 @@ mod tests {
             &default_static_axle_loads(),
         );
 
-        // Using previous values calculated:
-        // Net force = 2666.6667 - 282.875 =  2383.7917 N
+        // Powertrain force in gear 4 at 10 m/s = 8687.5 N (slipping, see above), above the
+        // RWD traction 0.9 * 4000 N = 3600 N, so the tyres limit it to 3600 N
+        // Net force = 3600 - 282.875 = 3317.125 N (1e-9 N: a single subtraction of exact values)
         assert!(
-            (net_force - 2383.7917).abs() < 1e-3,
+            (net_force - 3317.125).abs() < 1e-9,
             "Expected value: {}, calculated value: {}",
-            2383.7917,
+            3317.125,
             net_force
         );
     }
@@ -306,9 +354,9 @@ mod tests {
 
     #[test]
     fn test_net_force_coasting_above_terminal_speed() {
-        let mut simulation_config = SimulationConfig::default();
-        simulation_config.initial_car.speed = 80.0;
-        simulation_config.initial_car.gear = 5;
+        let mut simulation_config = prepared_config();
+        simulation_config.initial_car.speed = 95.0;
+        simulation_config.initial_car.gear = 8;
 
         let net_force = calculate_net_force(
             &simulation_config.car,
@@ -317,19 +365,22 @@ mod tests {
             &default_static_axle_loads(),
         );
 
-        // Powertrain force torque limited = 800 * 0.5 * 1.5 / 0.36 = 1666.6667 N
-        // Losses = 240 N + 0.5 * 1.225 * 0.35 * 2 * 80 * 80 = 240 + 2744 = 2984 N
-        // Net force = 1666.6667 - 2984 = -1317.3333 N (car must slow down)
+        // Gear 8 at 95 m/s, clutch locked: n = 95 * 4.95 / (2 * PI * 0.36) = 207.896 Hz
+        // T = 318 + (250 - 318) * (207.896 - 200) / 16.67 = 285.790 N·m
+        // Powertrain force = 285.790 * 4.95 / 0.36 = 3929.61 N, tyre limit 3600 N -> 3600 N
+        // Losses = 240 N + 0.5 * 1.225 * 0.35 * 2 * 95 * 95 = 240 + 3869.46875 = 4109.46875 N
+        // Net force = 3600 - 4109.46875 = -509.46875 N (car must slow down)
+        // 1e-9 N: sums of values that are exact in binary plus one rounded drag product
         assert!(
-            (net_force - (-1317.3333)).abs() < 1e-3,
-            "Expected value: -1317.3333, calculated value: {}",
+            (net_force - (-509.46875)).abs() < 1e-9,
+            "Expected value: -509.46875, calculated value: {}",
             net_force
         );
     }
 
     #[test]
     fn test_net_force_launch_from_standstill() {
-        let mut simulation_config = SimulationConfig::default();
+        let mut simulation_config = prepared_config();
         simulation_config.initial_car.speed = 0.0;
         simulation_config.initial_car.gear = 1;
 
@@ -340,7 +391,7 @@ mod tests {
             &default_static_axle_loads(),
         );
 
-        // Powertrain force in 1st gear = 800 * 3 * 1.5 / 0.36 = 10000 N
+        // Powertrain force in 1st gear, clutch slipping = 375 * 5.43 * 3.0 / 0.36 = 16968.75 N
         // Traction limited force (RWD) = 0.9 * 4000 N = 3600 N
         // Breakaway friction = 8000 N * 0.035 = 280 N, air drag at 0 m/s = 0 N
         // Net force = 3600 N - 280 N = 3320 N
@@ -353,7 +404,7 @@ mod tests {
 
     #[test]
     fn test_net_force_standstill_not_negative() {
-        let mut simulation_config = SimulationConfig::default();
+        let mut simulation_config = prepared_config();
         simulation_config.initial_car.speed = 0.0;
         simulation_config.initial_car.gear = 1;
         // Breakaway friction set explicitly higher than the traction limit

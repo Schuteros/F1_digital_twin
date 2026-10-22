@@ -7,7 +7,10 @@ use crate::physics::chassis::{
 use crate::physics::environment::Environment;
 use crate::physics::forces::{calculate_acceleration, calculate_net_force};
 use crate::physics::integrators::euler;
-use crate::physics::powertrain::{Drivetrain, calculate_transmission_input_revs, select_best_gear};
+use crate::physics::powertrain::{
+    Drivetrain, Powertrain, calculate_clutch_lock_speeds, calculate_transmission_input_revs,
+    calculate_upshift_speeds, count_down_shift_time, select_gear,
+};
 use crate::physics::states::CarState;
 use crate::physics::track::{Track, find_active_braking_zone, is_braking_zone};
 
@@ -112,6 +115,117 @@ fn validate_corner_suspension(name: &str, corner: &CornerSuspension) -> Result<(
     Ok(())
 }
 
+/// Checks the torque curve, rev range, gearing and shift data (docs/12 sections 12.2 and 12.9)
+fn validate_powertrain(powertrain: &Powertrain) -> Result<(), String> {
+    let curve = &powertrain.torque_curve;
+    if curve.len() < 2 {
+        return Err(format!(
+            "powertrain.torque_curve must have at least 2 points, got {}",
+            curve.len()
+        ));
+    }
+
+    for (index, &(revs_hz, torque)) in curve.iter().enumerate() {
+        if !revs_hz.is_finite() {
+            return Err(format!(
+                "powertrain.torque_curve[{}] engine speed must be finite, got {}",
+                index, revs_hz
+            ));
+        }
+
+        if !torque.is_finite() || torque < 0.0 {
+            return Err(format!(
+                "powertrain.torque_curve[{}] torque must be >= 0 N·m, got {}",
+                index, torque
+            ));
+        }
+    }
+
+    for (index, pair) in curve.windows(2).enumerate() {
+        if pair[1].0 <= pair[0].0 {
+            return Err(format!(
+                "powertrain.torque_curve engine speeds must be strictly increasing, got {} Hz at [{}] after {} Hz",
+                pair[1].0,
+                index + 1,
+                pair[0].0
+            ));
+        }
+    }
+
+    for (field, revs) in [
+        ("min_revs", powertrain.min_revs),
+        ("max_revs", powertrain.max_revs),
+    ] {
+        if !revs.is_finite() {
+            return Err(format!("powertrain.{} must be finite, got {}", field, revs));
+        }
+    }
+
+    if powertrain.min_revs >= powertrain.max_revs {
+        return Err(format!(
+            "powertrain.min_revs must be < powertrain.max_revs, got {} Hz >= {} Hz",
+            powertrain.min_revs, powertrain.max_revs
+        ));
+    }
+
+    let first_revs = curve[0].0;
+    let last_revs = curve[curve.len() - 1].0;
+    if first_revs > powertrain.min_revs || last_revs < powertrain.max_revs {
+        return Err(format!(
+            "powertrain.torque_curve must cover min_revs to max_revs ({} Hz to {} Hz), got {} Hz to {} Hz",
+            powertrain.min_revs, powertrain.max_revs, first_revs, last_revs
+        ));
+    }
+
+    let gear_ratios = &powertrain.gear_ratios;
+    if gear_ratios.is_empty() {
+        return Err("powertrain.gear_ratios must not be empty".to_string());
+    }
+
+    for (index, &gear_ratio) in gear_ratios.iter().enumerate() {
+        if !gear_ratio.is_finite() || gear_ratio <= 0.0 {
+            return Err(format!(
+                "powertrain.gear_ratios[{}] must be > 0, got {}",
+                index, gear_ratio
+            ));
+        }
+    }
+
+    for (index, pair) in gear_ratios.windows(2).enumerate() {
+        if pair[1] >= pair[0] {
+            return Err(format!(
+                "powertrain.gear_ratios must be strictly decreasing, got {} at [{}] after {}",
+                pair[1],
+                index + 1,
+                pair[0]
+            ));
+        }
+    }
+
+    if !powertrain.final_drive.is_finite() || powertrain.final_drive <= 0.0 {
+        return Err(format!(
+            "powertrain.final_drive must be > 0, got {}",
+            powertrain.final_drive
+        ));
+    }
+
+    if !powertrain.shift_time.is_finite() || powertrain.shift_time < 0.0 {
+        return Err(format!(
+            "powertrain.shift_time must be >= 0 s, got {}",
+            powertrain.shift_time
+        ));
+    }
+
+    if !powertrain.downshift_hysteresis.is_finite() || powertrain.downshift_hysteresis < 0.0 {
+        return Err(format!(
+            "powertrain.downshift_hysteresis must be >= 0 m/s, got {}",
+            powertrain.downshift_hysteresis
+        ));
+    }
+
+    Ok(())
+}
+
 /// Stiffest wheel rate a corner can have in Newtons per meter, N/m: spring + the stiffer end stop
 fn calculate_stiffest_corner_rate(corner: &CornerSuspension) -> f64 {
     corner.spring_rate + corner.bump_rate.max(corner.droop_rate)
@@ -135,6 +249,26 @@ impl SimulationConfig {
             return Err(format!(
                 "AllWheelDrive front_torque_split must be in 0.0..=1.0, got {}",
                 front_torque_split
+            ));
+        }
+
+        validate_powertrain(&self.car.powertrain)?;
+
+        // The shift tables and the wheel force divide by the wheel radius (docs/12, equation 12.3)
+        let wheel_radius = self.car.tyre.wheel_radius;
+        if !wheel_radius.is_finite() || wheel_radius <= 0.0 {
+            return Err(format!(
+                "tyre.wheel_radius must be > 0 m, got {}",
+                wheel_radius
+            ));
+        }
+
+        let top_gear = self.car.powertrain.gear_ratios.len();
+        let initial_gear = self.initial_car.gear as usize;
+        if !(1..=top_gear).contains(&initial_gear) {
+            return Err(format!(
+                "initial_car.gear must be in 1..={}, got {}",
+                top_gear, initial_gear
             ));
         }
 
@@ -225,6 +359,21 @@ impl SimulationConfig {
 
         Ok(())
     }
+
+    /// Validates the config, then fills the powertrain tables that only depend on car data:
+    /// `clutch_lock_speeds` (docs/12, equation 12.8) and `upshift_speeds` (docs/12 section 12.6).
+    /// Runs once before the simulation (docs/12 section 12.10, before the simulation).
+    pub fn prepare(&mut self) -> Result<(), String> {
+        self.validate()?;
+
+        let wheel_radius = self.car.tyre.wheel_radius;
+        let powertrain = &mut self.car.powertrain;
+        powertrain.clutch_lock_speeds = calculate_clutch_lock_speeds(powertrain, wheel_radius);
+        // The upshift scan starts at the clutch lock speeds, so they are filled first
+        powertrain.upshift_speeds = calculate_upshift_speeds(powertrain, wheel_radius);
+
+        Ok(())
+    }
 }
 
 impl SimulationState {
@@ -300,23 +449,49 @@ fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &S
         simulation_state.car.active_braking_zone,
     );
 
+    let powertrain = &simulation_config.car.powertrain;
+
+    // docs/12 section 12.10, steps 1 and 2: no new shift while one is in progress. A gear
+    // change starts the shift timer, and the step that starts the shift is its first step
+    // without drive, so 5 ms at 1 ms steps is exactly 5 steps without drive.
+    if simulation_state.car.shift_time_left <= 0.0 {
+        let gear = select_gear(
+            powertrain,
+            simulation_state.car.gear,
+            simulation_state.car.speed,
+            simulation_state.car.braking,
+        );
+
+        if gear != simulation_state.car.gear {
+            simulation_state.car.gear = gear;
+            simulation_state.car.shift_time_left = powertrain.shift_time;
+        }
+    }
+
+    // Step 3: locked transmission input speed for the current gear (docs/12, equation 12.2)
     simulation_state.car.revs_hz = calculate_transmission_input_revs(
-        &simulation_config.car.powertrain,
+        powertrain,
         simulation_config.car.tyre.wheel_radius,
-        &simulation_state.car,
-    );
-    simulation_state.car.gear = select_best_gear(
-        &simulation_config.car.powertrain,
-        simulation_state.car.revs_hz,
         simulation_state.car.gear,
+        simulation_state.car.speed,
     );
 
-    // docs/11 section 11.8, steps 1 to 4: tyre loads from the suspension state, then a_x
+    // Steps 4 and 5 (docs/12 section 12.10) with docs/11 section 11.8, steps 1 to 4: tyre loads
+    // from the suspension state, then a_x. The powertrain force is the best force in the gear
+    // (12.10), 0 while shift_time_left > 0, capped at the tyre grip limit.
     simulation_state.car.acceleration = get_car_acceleration(
         &simulation_config.car,
         &simulation_state.car,
         &simulation_config.environment,
     );
+
+    // The drive for this step is decided, so count the shift timer down (docs/12 section 12.8)
+    if simulation_state.car.shift_time_left > 0.0 {
+        simulation_state.car.shift_time_left = count_down_shift_time(
+            simulation_state.car.shift_time_left,
+            simulation_config.time_step,
+        );
+    }
 
     // Step 5: body accelerations from the same suspension state and this step's a_x
     let body_accelerations = calculate_body_accelerations_from_state(
@@ -361,17 +536,20 @@ fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &S
     simulation_state.time += simulation_config.time_step;
 }
 
-/// Function to start simulation and iterates trough simulation steps
+/// Function to start simulation and iterates trough simulation steps.
+///
+/// Fills the powertrain shift tables in `simulation_config` first (`SimulationConfig::prepare`).
 pub fn start_simulation(
-    simulation_config: &SimulationConfig,
+    simulation_config: &mut SimulationConfig,
     telemetry: bool,
     verbose: bool,
 ) -> SimulationState {
     // An invalid config is a setup error, not a runtime condition, so fail loudly.
-    // Callers who want to handle it gracefully can call `validate()` themselves first.
-    if let Err(message) = simulation_config.validate() {
+    // Callers who want to handle it gracefully can call `prepare()` themselves first.
+    if let Err(message) = simulation_config.prepare() {
         panic!("Invalid simulation config: {}", message);
     }
+    let simulation_config = &*simulation_config;
 
     let mut simulation_state = SimulationState::new(simulation_config);
 
@@ -410,16 +588,101 @@ pub fn start_simulation(
 
 #[cfg(test)]
 mod tests {
+    use crate::physics::aero::calculate_air_drag;
     use crate::physics::chassis::{SuspensionState, calculate_tyre_loads, sum_axle_loads};
-    use crate::physics::powertrain::Drivetrain;
+    use crate::physics::powertrain::{
+        Drivetrain, calculate_best_force, calculate_engine_torque, calculate_peak_torque,
+        calculate_total_ratio,
+    };
     use crate::physics::simulation::{
         SimulationConfig, SimulationState, calculate_total_steps, get_car_acceleration,
         get_car_distance, get_car_speed, simulation_step, start_simulation,
     };
+    use crate::physics::states::CarState;
+    use crate::physics::tyres::{calculate_current_tyre_friction, calculate_split_force_limit};
+
+    /// Largest rounding error in Newtons, N, when a step's powertrain force is recovered from
+    /// a_x * m + losses: dividing by the mass and multiplying back on forces up to ~2e4 N rounds
+    /// at ~1e-11 N, so 1e-6 N is far above rounding and far below any real force
+    const FORCE_ROUNDING: f64 = 1e-6;
+
+    /// Returns the config with the powertrain shift tables filled (docs/12 section 12.10)
+    fn prepared(mut simulation_config: SimulationConfig) -> SimulationConfig {
+        simulation_config.prepare().unwrap();
+        simulation_config
+    }
+
+    /// Default config from rest at 0 m, in 1st gear, with no braking zones
+    fn standing_start_config() -> SimulationConfig {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.initial_car.speed = 0.0;
+        simulation_config.initial_car.distance = 0.0;
+        simulation_config.initial_car.gear = 1;
+        simulation_config.track.braking_zones = vec![];
+        prepared(simulation_config)
+    }
+
+    /// Powertrain force at the tyres in Newtons, N, that a step applied: the net force
+    /// a_x * m plus the losses (tyre friction and air drag) at the state the step started from
+    fn applied_powertrain_force(
+        simulation_config: &SimulationConfig,
+        before: &CarState,
+        acceleration: f64,
+    ) -> f64 {
+        let car = &simulation_config.car;
+        let environment = &simulation_config.environment;
+        let axle_loads = sum_axle_loads(&calculate_tyre_loads(
+            car,
+            &before.suspension,
+            environment.g_acceleration,
+        ));
+        let losses = calculate_current_tyre_friction(
+            axle_loads.total(),
+            car.tyre.mu_rolling,
+            car.tyre.mu_breakaway,
+            before.speed,
+        ) + calculate_air_drag(
+            environment.air_density,
+            car.aero.drag_coefficient,
+            car.aero.frontal_area,
+            before.speed,
+        );
+
+        acceleration * car.mass.total + losses
+    }
+
+    /// Tyre grip limit of the driven axles in Newtons, N, at the state a step started from
+    fn grip_limit(simulation_config: &SimulationConfig, before: &CarState) -> f64 {
+        let car = &simulation_config.car;
+        let axle_loads = sum_axle_loads(&calculate_tyre_loads(
+            car,
+            &before.suspension,
+            simulation_config.environment.g_acceleration,
+        ));
+
+        calculate_split_force_limit(
+            &axle_loads,
+            car.tyre.mu_static,
+            car.powertrain.drivetrain.front_share(),
+        )
+    }
+
+    /// Gear the upshift table gives for `speed` in meters per second, m/s: 1 + the number of
+    /// upshift speeds at or below it (docs/12 section 12.6)
+    fn table_gear(simulation_config: &SimulationConfig, speed: f64) -> u8 {
+        let upshifts_passed = simulation_config
+            .car
+            .powertrain
+            .upshift_speeds
+            .iter()
+            .filter(|&&upshift_speed| speed >= upshift_speed)
+            .count();
+        1 + upshifts_passed as u8
+    }
 
     #[test]
     fn test_get_car_acceleration() {
-        let mut simulation_config = SimulationConfig::default();
+        let mut simulation_config = prepared(SimulationConfig::default());
 
         simulation_config.initial_car.gear = 4;
         let acceleration = get_car_acceleration(
@@ -428,20 +691,22 @@ mod tests {
             &simulation_config.environment,
         );
 
-        // from forces.rs and knowing total mass expected value:
-        // 2383.7917 / ( 8000.0 / 9.81 ) = 2.92312457212
+        // from forces.rs: gear 4 at 10 m/s slips and gives 8687.5 N, the RWD tyres limit it to
+        // 3600 N, net force = 3600 - 282.875 = 3317.125 N. Knowing total mass expected value:
+        // 3317.125 / 815.494393476 = 4.06762453125 m/s^2 (1e-9: rounding of one division)
         assert!(
-            (acceleration - 2.92312457212).abs() < 1e-3,
-            "Expected value: 2.92312457212, calculated value: {}",
+            (acceleration - 4.06762453125).abs() < 1e-9,
+            "Expected value: 4.06762453125, calculated value: {}",
             acceleration
         );
     }
 
     #[test]
     fn test_get_car_acceleration_uses_suspension_state() {
-        let mut simulation_config = SimulationConfig::default();
-        // 1st gear at 10 m/s: powertrain force = min(800_000 / 10, 800 * 3 * 1.5 / 0.36) = 10000 N,
-        // so the rear (driven) axle grip is the limit
+        let mut simulation_config = prepared(SimulationConfig::default());
+        // 1st gear at 10 m/s, below the 18.514 m/s lock speed: the clutch slips and the
+        // powertrain force = 375 * 5.43 * 3.0 / 0.36 = 16968.75 N, so the rear (driven) axle
+        // grip is the limit
         simulation_config.initial_car.gear = 1;
 
         let acceleration_static = get_car_acceleration(
@@ -488,7 +753,7 @@ mod tests {
 
     #[test]
     fn test_get_car_speed() {
-        let simulation_config = SimulationConfig::default();
+        let simulation_config = prepared(SimulationConfig::default());
 
         let mut simulation_state = SimulationState::new(&simulation_config);
         simulation_state.car.gear = 4;
@@ -501,10 +766,10 @@ mod tests {
         let speed = get_car_speed(&simulation_state.car, &simulation_config, acceleration);
 
         // from previous test results we know:
-        // expected value: speed = 10 + 2.92312457212 * 0.001 =    10.0029231246
+        // expected value: speed = 10 + 4.06762453125 * 0.001 = 10.00406762453125
         assert!(
-            (speed - 10.0029231246).abs() < 1e-4,
-            "Expected value: 10.0029231246 Calculated value: {}",
+            (speed - 10.00406762453125).abs() < 1e-4,
+            "Expected value: 10.00406762453125 Calculated value: {}",
             speed
         );
     }
@@ -515,34 +780,41 @@ mod tests {
 
         let simulation_state = SimulationState::new(&simulation_config);
 
-        let speed = 10.0029231246;
+        let speed = 10.00406762453125;
 
         let distance = get_car_distance(&simulation_state.car, &simulation_config, speed);
 
         // From previous test results:
-        // Expected value: distance = 100 + 10.0029231246 * 0.001 = 100.010002923
-        assert!((distance - 100.010002923).abs() < 1e-4);
+        // Expected value: distance = 100 + 10.00406762453125 * 0.001 = 100.01000406762
+        assert!((distance - 100.01000406762).abs() < 1e-4);
     }
 
     #[test]
     fn test_simulation_step() {
-        let simulation_config = SimulationConfig::default();
+        let simulation_config = prepared(SimulationConfig::default());
 
         let mut simulation_state = SimulationState::new(&simulation_config);
         simulation_state.car.gear = 4;
 
         simulation_step(&mut simulation_state, &simulation_config);
 
-        // Expected value from the calculated results with correct gear: speed = 10.00374062453125
+        // 4th gear at 10 m/s is too high: 10 < 46.38 - 0.5 m/s (docs/12, equation 12.14), so
+        // the step shifts down to 3rd and starts the 5 ms shift timer (one step counted down)
+        assert_eq!(simulation_state.car.gear, 3);
+        // 0.005 - 0.001 s, 1e-15 s covers the rounding of one subtraction
+        assert!((simulation_state.car.shift_time_left - 0.004).abs() < 1e-15);
+
+        // No drive during the shift, only losses: a = -282.875 / 815.494393476 = -0.34687546875
+        // Expected value: speed = 10 - 0.34687546875 * 0.001 = 9.99965312453125
         assert!(
-            (simulation_state.car.speed - 10.00374062453125).abs() < 1e-4,
-            "Speed didn't update correctly, expected: calculated: {}",
+            (simulation_state.car.speed - 9.99965312453125).abs() < 1e-4,
+            "Speed didn't update correctly, expected: 9.99965312453125 calculated: {}",
             simulation_state.car.speed
         );
 
-        // Expected value from previous results: distance = 100 + 10.00374062453125 * 0.001 =
+        // Expected value from previous results: distance = 100 + 9.99965312453125 * 0.001 = 100.00999965
         assert!(
-            (simulation_state.car.distance - 100.010003741).abs() < 1e-4,
+            (simulation_state.car.distance - 100.00999965).abs() < 1e-4,
             "Distance didn't update correctly"
         );
     }
@@ -557,14 +829,14 @@ mod tests {
             ..SimulationConfig::default()
         };
 
-        let mut dist_a = start_simulation(&simulation_config, false, false)
+        let mut dist_a = start_simulation(&mut simulation_config, false, false)
             .car
             .distance;
         let mut prev_diff = f64::MAX;
 
         for _ in 0..5 {
             simulation_config.time_step /= 5.0;
-            let dist_b = start_simulation(&simulation_config, false, false)
+            let dist_b = start_simulation(&mut simulation_config, false, false)
                 .car
                 .distance;
 
@@ -609,12 +881,16 @@ mod tests {
             corner.droop_rate = 0.0;
         }
 
-        let mut speed_slower = start_simulation(&simulation_config, false, false).car.speed;
+        let mut speed_slower = start_simulation(&mut simulation_config, false, false)
+            .car
+            .speed;
         let mut speed_faster: f64;
 
         for _ in 0..10 {
             simulation_config.time_step += 0.5;
-            speed_faster = start_simulation(&simulation_config, false, false).car.speed;
+            speed_faster = start_simulation(&mut simulation_config, false, false)
+                .car
+                .speed;
             assert!(speed_faster > speed_slower, "Speed didn't increase!");
             speed_slower = speed_faster;
         }
@@ -622,7 +898,7 @@ mod tests {
 
     #[test]
     fn test_straight_line_braking() {
-        let mut simulation_config = SimulationConfig::default();
+        let mut simulation_config = prepared(SimulationConfig::default());
         simulation_config.track.braking_zones = vec![(0.0, 500.0)];
 
         let mut simulation_state = SimulationState::new(&simulation_config);
@@ -642,7 +918,7 @@ mod tests {
         simulation_config.track.braking_zones = vec![(0.0, 1000.0)];
         simulation_config.end_time = 10.0;
 
-        let end_state = start_simulation(&simulation_config, false, false);
+        let end_state = start_simulation(&mut simulation_config, false, false);
         assert_eq!(end_state.car.speed, 0.0);
         // Stopped car is no longer decelerating
         assert_eq!(end_state.car.acceleration, 0.0);
@@ -656,7 +932,7 @@ mod tests {
         simulation_config.initial_car.gear = 1;
         simulation_config.end_time = 1.0;
 
-        let end_state = start_simulation(&simulation_config, false, false);
+        let end_state = start_simulation(&mut simulation_config, false, false);
 
         // Net force at rest = 3600 N - 280 N = 3320 N > 0 (see forces.rs), so the car must move off.
         // With the old mu_breakaway = 0.7 (5600 N > 3600 N) it stayed at 0 m/s forever.
@@ -676,6 +952,7 @@ mod tests {
         simulation_config.initial_car.gear = 1;
         // Launch, accelerate for 50 m, then brake until stopped
         simulation_config.track.braking_zones = vec![(50.0, 1000.0)];
+        let simulation_config = prepared(simulation_config);
 
         let mut simulation_state = SimulationState::new(&simulation_config);
         let mut last_distance = simulation_state.car.distance;
@@ -707,6 +984,257 @@ mod tests {
         assert!(braked, "Car never reached the braking zone");
         assert_eq!(simulation_state.car.speed, 0.0);
         assert_eq!(simulation_state.car.acceleration, 0.0);
+    }
+
+    #[test]
+    fn test_full_run_upshifts_without_hunting() {
+        // From rest with no braking zones the car should go 1 -> 8, one gear at a time, each
+        // upshift once, at the table speed (docs/12 section 12.6), never over-revving
+        // (docs/12 section 12.7), with exactly 5 steps without drive per shift (5 ms at 1 ms
+        // steps, docs/12 section 12.8)
+        let simulation_config = standing_start_config();
+        let powertrain = &simulation_config.car.powertrain;
+        let wheel_radius = simulation_config.car.tyre.wheel_radius;
+        let top_gear = powertrain.gear_ratios.len() as u8;
+        let mut simulation_state = SimulationState::new(&simulation_config);
+
+        let mut upshifts: Vec<u8> = Vec::new();
+        // Speed the previous step chose its gear at, m/s
+        let mut last_checked_speed = simulation_state.car.speed;
+        // Steps without drive since the last upshift, None before the first one
+        let mut steps_without_drive: Option<usize> = None;
+        let mut steps_in_top_gear = 0;
+
+        // 1 s in top gear is enough to see the last shift through; 200 s is a safety stop
+        for _ in 0..200_000 {
+            let before = simulation_state.car;
+            simulation_step(&mut simulation_state, &simulation_config);
+            let after = simulation_state.car;
+
+            assert!(!after.braking);
+            assert!(
+                after.gear >= before.gear,
+                "Downshift {} -> {} at {} m/s",
+                before.gear,
+                after.gear,
+                before.speed
+            );
+
+            let shifted = after.gear != before.gear;
+            if shifted {
+                assert_eq!(after.gear, before.gear + 1, "Skipped a gear");
+                assert!(!upshifts.contains(&before.gear), "Repeated upshift");
+                upshifts.push(before.gear);
+
+                // The first step to see the speed at or above the table speed shifts, so the shift
+                // is within one step of travel of it
+                let upshift_speed = powertrain.upshift_speeds[before.gear as usize - 1];
+                assert!(
+                    last_checked_speed < upshift_speed && upshift_speed <= before.speed,
+                    "Upshift {} -> {} at {} m/s, table speed {} m/s, previous step {} m/s",
+                    before.gear,
+                    after.gear,
+                    before.speed,
+                    upshift_speed,
+                    last_checked_speed
+                );
+            }
+            if before.shift_time_left <= 0.0 {
+                last_checked_speed = before.speed;
+            }
+
+            // Drive this step: 0 during a shift, otherwise the best force capped at the grip
+            let applied_force =
+                applied_powertrain_force(&simulation_config, &before, after.acceleration);
+            let best_force =
+                calculate_best_force(powertrain, wheel_radius, after.gear, before.speed);
+            let shifting = shifted || before.shift_time_left > 0.0;
+            let expected_force = if shifting {
+                0.0
+            } else {
+                best_force.min(grip_limit(&simulation_config, &before))
+            };
+            assert!(
+                (applied_force - expected_force).abs() < FORCE_ROUNDING,
+                "Gear {} at {} m/s: applied {} N, expected {} N",
+                after.gear,
+                before.speed,
+                applied_force,
+                expected_force
+            );
+
+            // Exactly 5 steps without drive after each upshift, the 6th has drive again
+            if shifted {
+                steps_without_drive = Some(0);
+            }
+            if let Some(count) = steps_without_drive {
+                if shifting {
+                    steps_without_drive = Some(count + 1);
+                } else {
+                    assert_eq!(
+                        count, 5,
+                        "Steps without drive after upshift to {}",
+                        after.gear
+                    );
+                    assert!(applied_force > 0.0);
+                    steps_without_drive = None;
+                }
+            }
+
+            // Rev limit: the locked engine speed never passes max_revs below top gear. In top
+            // gear the limiter cuts the force to 0 instead.
+            if after.gear < top_gear {
+                assert!(
+                    after.revs_hz <= powertrain.max_revs,
+                    "Over-rev in gear {}: {} Hz",
+                    after.gear,
+                    after.revs_hz
+                );
+            } else {
+                if after.revs_hz > powertrain.max_revs {
+                    assert_eq!(best_force, 0.0);
+                }
+                steps_in_top_gear += 1;
+                if steps_in_top_gear > 1000 {
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(upshifts, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(simulation_state.car.gear, top_gear);
+        assert_eq!(steps_without_drive, None, "Last shift never finished");
+    }
+
+    #[test]
+    fn test_launch_clutch_slip_grip_limited() {
+        // From rest in 1st, the clutch slips below the lock speed 18.514 m/s (docs/12 section
+        // 12.5): the engine sits at peak torque, 375 * 16.29 / 0.36 = 16968.75 N, well above
+        // the RWD grip (~3600 N), so the force at the tyres is the grip limit
+        let simulation_config = standing_start_config();
+        let powertrain = &simulation_config.car.powertrain;
+        let wheel_radius = simulation_config.car.tyre.wheel_radius;
+        let peak = calculate_peak_torque(powertrain);
+        let clutch_lock_speed = powertrain.clutch_lock_speeds[0];
+        // Rounded to 3 decimals (+-0.0005), so 0.001 covers it
+        assert!((clutch_lock_speed - 18.514).abs() < 1e-3);
+
+        let mut simulation_state = SimulationState::new(&simulation_config);
+        let mut slipping_steps = 0;
+        let mut locked_steps = 0;
+
+        while simulation_state.car.speed < powertrain.upshift_speeds[0] {
+            let before = simulation_state.car;
+            simulation_step(&mut simulation_state, &simulation_config);
+            let after = simulation_state.car;
+            assert_eq!(after.gear, 1);
+
+            let best_force = calculate_best_force(powertrain, wheel_radius, 1, before.speed);
+            if before.speed < clutch_lock_speed {
+                // Slipping: the locked engine speed is below peak torque speed, the engine is
+                // held at peak torque instead (1e-9 relative: rounding only)
+                slipping_steps += 1;
+                assert!(after.revs_hz < peak.revs_hz);
+                assert!((best_force - 16968.75).abs() < 1e-9 * 16968.75);
+            } else {
+                // Locked: the engine follows the gearing (docs/12, equation 12.3)
+                locked_steps += 1;
+                let locked_force = calculate_engine_torque(powertrain, after.revs_hz)
+                    * calculate_total_ratio(powertrain, 1)
+                    / wheel_radius;
+                assert_eq!(best_force, locked_force);
+            }
+
+            // Grip-limited in both phases with the default data
+            let grip = grip_limit(&simulation_config, &before);
+            assert!(
+                best_force > grip,
+                "Not grip-limited at {} m/s",
+                before.speed
+            );
+            let applied_force =
+                applied_powertrain_force(&simulation_config, &before, after.acceleration);
+            assert!(
+                (applied_force - grip).abs() < FORCE_ROUNDING,
+                "At {} m/s: applied {} N, grip {} N",
+                before.speed,
+                applied_force,
+                grip
+            );
+        }
+
+        assert!(slipping_steps > 0 && locked_steps > 0);
+    }
+
+    #[test]
+    fn test_no_downshift_while_braking() {
+        // Brake from 80 m/s in top gear for 215 m (exits at about 42.0 m/s, between the 2 -> 3
+        // and 3 -> 4 upshift speeds 38.37 and 46.38 m/s), then let go: no downshift inside the zone,
+        // after it one gear per shift_time (5 steps) down to the gear the table gives
+        // (docs/12 section 12.7)
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.initial_car.speed = 80.0;
+        simulation_config.initial_car.distance = 0.0;
+        simulation_config.initial_car.gear = 8;
+        simulation_config.track.braking_zones = vec![(0.0, 215.0)];
+        let simulation_config = prepared(simulation_config);
+        let mut simulation_state = SimulationState::new(&simulation_config);
+
+        // Inside the zone the gear stays in 8th
+        let mut braking_steps = 0;
+        loop {
+            let before = simulation_state.car;
+            simulation_step(&mut simulation_state, &simulation_config);
+            if !simulation_state.car.braking {
+                // This step left the zone, rewind it so the loop below sees the first shift
+                simulation_state.car = before;
+                break;
+            }
+            assert_eq!(simulation_state.car.gear, 8, "Downshift while braking");
+            braking_steps += 1;
+        }
+        assert!(braking_steps > 0);
+
+        // The exit speed must be clear of the hysteresis bands, so the table gear is unambiguous
+        let exit_speed = simulation_state.car.speed;
+        for &upshift_speed in &simulation_config.car.powertrain.upshift_speeds {
+            assert!(
+                (exit_speed - upshift_speed).abs() > 1.0,
+                "Exit speed {} m/s too close to {} m/s",
+                exit_speed,
+                upshift_speed
+            );
+        }
+        let target_gear = table_gear(&simulation_config, exit_speed);
+        assert!(
+            target_gear < 7,
+            "Exit speed {} m/s too high to test",
+            exit_speed
+        );
+
+        // Steps down one gear every 5 steps (shift_time 5 ms / time_step 1 ms)
+        let mut shift_steps: Vec<usize> = Vec::new();
+        for step in 0..100 {
+            let gear_before = simulation_state.car.gear;
+            simulation_step(&mut simulation_state, &simulation_config);
+            assert!(!simulation_state.car.braking);
+
+            let gear_after = simulation_state.car.gear;
+            if gear_after != gear_before {
+                assert_eq!(gear_after, gear_before - 1, "Not one gear at a time");
+                shift_steps.push(step);
+            }
+        }
+
+        assert_eq!(simulation_state.car.gear, target_gear);
+        assert_eq!(shift_steps.len(), (8 - target_gear) as usize);
+        assert_eq!(
+            shift_steps[0], 0,
+            "First downshift not right after the zone"
+        );
+        for pair in shift_steps.windows(2) {
+            assert_eq!(pair[1] - pair[0], 5, "Downshifts not one shift_time apart");
+        }
     }
 
     #[test]
@@ -784,6 +1312,82 @@ mod tests {
                 c.time_step = 0.005;
                 c.car.suspension.rear_left.droop_rate = 1e8;
             }),
+            // Torque curve (docs/12 section 12.2)
+            ("torque_curve 1 point", |c| {
+                c.car.powertrain.torque_curve = vec![(66.67, 300.0)]
+            }),
+            ("torque_curve empty", |c| {
+                c.car.powertrain.torque_curve = vec![]
+            }),
+            ("torque_curve repeated engine speed", |c| {
+                c.car.powertrain.torque_curve[2].0 = 100.0
+            }),
+            ("torque_curve decreasing engine speed", |c| {
+                c.car.powertrain.torque_curve[2].0 = 90.0
+            }),
+            ("torque_curve engine speed NaN", |c| {
+                c.car.powertrain.torque_curve[3].0 = f64::NAN
+            }),
+            ("torque_curve torque < 0", |c| {
+                c.car.powertrain.torque_curve[1].1 = -1.0
+            }),
+            ("torque_curve torque NaN", |c| {
+                c.car.powertrain.torque_curve[1].1 = f64::NAN
+            }),
+            ("torque_curve torque infinite", |c| {
+                c.car.powertrain.torque_curve[4].1 = f64::INFINITY
+            }),
+            ("torque_curve starts above min_revs", |c| {
+                c.car.powertrain.torque_curve[0].0 = 70.0
+            }),
+            ("torque_curve ends below max_revs", |c| {
+                c.car.powertrain.torque_curve[5].0 = 210.0
+            }),
+            // Rev range
+            ("min_revs = max_revs", |c| {
+                c.car.powertrain.min_revs = 216.67
+            }),
+            ("min_revs > max_revs", |c| c.car.powertrain.min_revs = 300.0),
+            ("min_revs NaN", |c| c.car.powertrain.min_revs = f64::NAN),
+            ("max_revs infinite", |c| {
+                c.car.powertrain.max_revs = f64::INFINITY
+            }),
+            // Gearing
+            ("gear_ratios empty", |c| {
+                c.car.powertrain.gear_ratios = vec![]
+            }),
+            ("gear ratio = 0", |c| c.car.powertrain.gear_ratios[7] = 0.0),
+            ("gear ratio < 0", |c| {
+                c.car.powertrain.gear_ratios[7] = -1.65
+            }),
+            ("gear ratio NaN", |c| {
+                c.car.powertrain.gear_ratios[3] = f64::NAN
+            }),
+            ("gear ratios repeated", |c| {
+                c.car.powertrain.gear_ratios[2] = 4.02
+            }),
+            ("gear ratios increasing", |c| {
+                c.car.powertrain.gear_ratios[2] = 5.0
+            }),
+            ("final_drive = 0", |c| c.car.powertrain.final_drive = 0.0),
+            ("final_drive < 0", |c| c.car.powertrain.final_drive = -3.0),
+            ("final_drive infinite", |c| {
+                c.car.powertrain.final_drive = f64::INFINITY
+            }),
+            // Shifting
+            ("shift_time < 0", |c| c.car.powertrain.shift_time = -0.001),
+            ("shift_time NaN", |c| c.car.powertrain.shift_time = f64::NAN),
+            ("downshift_hysteresis < 0", |c| {
+                c.car.powertrain.downshift_hysteresis = -0.5
+            }),
+            ("downshift_hysteresis infinite", |c| {
+                c.car.powertrain.downshift_hysteresis = f64::INFINITY
+            }),
+            // Wheel radius and starting gear (the shift tables need both)
+            ("wheel_radius = 0", |c| c.car.tyre.wheel_radius = 0.0),
+            ("wheel_radius NaN", |c| c.car.tyre.wheel_radius = f64::NAN),
+            ("initial gear 0", |c| c.initial_car.gear = 0),
+            ("initial gear above top gear", |c| c.initial_car.gear = 9),
         ];
 
         for (name, break_config) in cases {
@@ -808,6 +1412,13 @@ mod tests {
         };
         // CoG on the ground is valid: no load transfer
         simulation_config.car.geometry.cog_height = 0.0;
+        // Instant shifts and no hysteresis are valid
+        simulation_config.car.powertrain.shift_time = 0.0;
+        simulation_config.car.powertrain.downshift_hysteresis = 0.0;
+        // A curve reaching past the rev range is valid, and a single gear is valid
+        simulation_config.car.powertrain.torque_curve =
+            vec![(50.0, 300.0), (133.33, 375.0), (250.0, 200.0)];
+        simulation_config.car.powertrain.gear_ratios = vec![5.43];
 
         assert_eq!(simulation_config.validate(), Ok(()));
     }
@@ -828,6 +1439,23 @@ mod tests {
         let message = simulation_config.validate().unwrap_err();
         assert!(message.starts_with("time_step must satisfy omega_max * time_step < 2"));
         assert!(message.contains("0.02"), "{}", message);
+
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.car.powertrain.shift_time = -0.001;
+        assert_eq!(
+            simulation_config.validate(),
+            Err("powertrain.shift_time must be >= 0 s, got -0.001".to_string())
+        );
+
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.car.powertrain.gear_ratios[2] = 5.0;
+        assert_eq!(
+            simulation_config.validate(),
+            Err(
+                "powertrain.gear_ratios must be strictly decreasing, got 5 at [2] after 4.02"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
@@ -841,9 +1469,47 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_fills_shift_tables() {
+        let mut simulation_config = SimulationConfig::default();
+        // Empty in Default
+        assert!(
+            simulation_config
+                .car
+                .powertrain
+                .clutch_lock_speeds
+                .is_empty()
+        );
+        assert!(simulation_config.car.powertrain.upshift_speeds.is_empty());
+
+        simulation_config.prepare().unwrap();
+
+        // One clutch lock speed per gear, one upshift speed per gear except the top gear
+        assert_eq!(simulation_config.car.powertrain.clutch_lock_speeds.len(), 8);
+        assert_eq!(simulation_config.car.powertrain.upshift_speeds.len(), 7);
+    }
+
+    #[test]
+    fn test_prepare_validates_first() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.car.powertrain.gear_ratios = vec![];
+
+        assert!(simulation_config.prepare().is_err());
+        // Nothing is computed from an invalid config
+        assert!(
+            simulation_config
+                .car
+                .powertrain
+                .clutch_lock_speeds
+                .is_empty()
+        );
+        assert!(simulation_config.car.powertrain.upshift_speeds.is_empty());
+    }
+
+    #[test]
     fn test_braking_dives_and_settles_after_stop() {
         let mut simulation_config = SimulationConfig::default();
         simulation_config.track.braking_zones = vec![(0.0, 1000.0)];
+        let simulation_config = prepared(simulation_config);
         let g_acceleration = simulation_config.environment.g_acceleration;
 
         let mut simulation_state = SimulationState::new(&simulation_config);
@@ -898,6 +1564,7 @@ mod tests {
         // Accelerating from 10 m/s in 1st gear: load moves to the rear, nose up
         let mut simulation_config = SimulationConfig::default();
         simulation_config.initial_car.gear = 1;
+        let simulation_config = prepared(simulation_config);
         let mut simulation_state = SimulationState::new(&simulation_config);
         assert_eq!(simulation_state.car.suspension, SuspensionState::default());
 
@@ -920,7 +1587,7 @@ mod tests {
         let mut simulation_config = SimulationConfig::default();
         simulation_config.car.geometry.wheelbase = 0.0;
 
-        start_simulation(&simulation_config, false, false);
+        start_simulation(&mut simulation_config, false, false);
     }
 
     #[test]

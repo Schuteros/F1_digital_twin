@@ -5,7 +5,7 @@ use std::time::Instant;
 
 fn main() {
     // 1. Load default config (or tweak specific values)
-    let config = SimulationConfig {
+    let mut config = SimulationConfig {
         end_time: 100000.0,
         ..SimulationConfig::default()
     };
@@ -14,7 +14,7 @@ fn main() {
 
     // 2. Run the simulation end-to-end
     let start = Instant::now();
-    let final_state = start_simulation(&config, false, false);
+    let final_state = start_simulation(&mut config, false, false);
     let duration = start.elapsed();
 
     println!("Simulation finished in: {:?}", duration);
