@@ -1,5 +1,9 @@
 # 2. Powertrain Force Dynamics
 
+> **Note:** The constant maximum torque / maximum power model described here is replaced by
+> the torque curve in [docs/12](12_Torque_Curve_and_Shifting.MD). The simulation no longer
+> uses equation 2.6. This document is kept for the background on $F = P/v$ and $F = iT/R$.
+
 The force that accelerates car to front is the one that comes from powertrain to the wheels
 and from wheels force is pushed to tarmac. Here we will only focus on the two main phenomena - 
 force limited by powertrain power and force limited by powertrain max torque.

@@ -1,5 +1,9 @@
 # 7.Gear Ratios and Powertrain Dynamics
 
+> **Note:** The constant torque / power engine model used with these gear equations is replaced
+> by the torque curve in [docs/12](12_Torque_Curve_and_Shifting.MD), which also defines gear
+> selection (optimal upshift table, downshift rule and shift time). Equations 7.2 and 7.3 still apply.
+
 ---
 
 ## 7.1. Why Engines Need Gearboxes
