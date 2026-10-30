@@ -1,6 +1,6 @@
 # F1 Digital Twin Simulator For Design Validation
 
-Physics simulation of a Formula 1 car in progress. In reality, it is not limited to just F1 cars, but any type of car with 4 wheels. Current version 0.5.0.
+Physics simulation of a Formula 1 car in progress. In reality, it is not limited to just F1 cars, but any type of car with 4 wheels. Current version 0.6.0.
 
 ---
 
@@ -8,9 +8,8 @@ Physics simulation of a Formula 1 car in progress. In reality, it is not limited
 
 * **Goal:** We are using Rust programming language code to simulate 2D motion of F1 car.
 * **Current Phase:** We have made a simulation that can simulate 1D motion acceleration with simplified models
-* **In Progress (unreleased):** Data files for the car, tyres, track and environment: every parameter now lives in editable TOML / CSV files under `data/` (with SI units in every key name), and a run is started from one run file (section 2)
-* **Latest Milestone (0.5.0):** Torque curve, clutch slip and optimal shifting (docs/12): the engine is a full-throttle torque curve stored as data (estimated 2026-style F1 ICE without MGU-K, 8 gears), the clutch slips below a per-gear lock speed, upshift speeds come from a table computed before the simulation, downshifts only happen when not braking, and each shift cuts the drive for `shift_time`
-* **Previous Milestone (0.4.0):** Suspension pitch and heave dynamics (docs/11): the body sits on four spring-damper corners with bump/droop stops and a wheel lift clamp, so load transfer now arrives through a transient instead of instantly
+* **Latest Milestone (0.6.0):** Data files for the car, tyres, track and environment: every parameter now lives in editable TOML / CSV files under `data/` (with SI units in every key name), and a run is started from one run file (section 2)
+* **Previous Milestone (0.5.0):** Torque curve, clutch slip and optimal shifting (docs/12): the engine is a full-throttle torque curve stored as data (estimated 2026-style F1 ICE without MGU-K, 8 gears), the clutch slips below a per-gear lock speed, upshift speeds come from a table computed before the simulation, downshifts only happen when not braking, and each shift cuts the drive for `shift_time`
  
 ---
 
