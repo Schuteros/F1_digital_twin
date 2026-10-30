@@ -8,12 +8,43 @@ Physics simulation of a Formula 1 car in progress. In reality, it is not limited
 
 * **Goal:** We are using Rust programming language code to simulate 2D motion of F1 car.
 * **Current Phase:** We have made a simulation that can simulate 1D motion acceleration with simplified models
+* **In Progress (unreleased):** Data files for the car, tyres, track and environment: every parameter now lives in editable TOML / CSV files under `data/` (with SI units in every key name), and a run is started from one run file (section 2)
 * **Latest Milestone (0.5.0):** Torque curve, clutch slip and optimal shifting (docs/12): the engine is a full-throttle torque curve stored as data (estimated 2026-style F1 ICE without MGU-K, 8 gears), the clutch slips below a per-gear lock speed, upshift speeds come from a table computed before the simulation, downshifts only happen when not braking, and each shift cuts the drive for `shift_time`
 * **Previous Milestone (0.4.0):** Suspension pitch and heave dynamics (docs/11): the body sits on four spring-damper corners with bump/droop stops and a wheel lift clamp, so load transfer now arrives through a transient instead of instantly
  
 ---
 
-## 2. Current Physics Architecture
+## 2. Running a Simulation
+
+A simulation is started from a run file, which picks the car, tyres, track and environment files and sets the time
+settings and the starting state of the car:
+
+```
+cargo run --release -- data/runs/baseline.toml
+```
+
+Without a run file the program prints a usage line and exits with an error. A bad data file (missing or unknown key,
+wrong `format_version`, bad CSV row, or a value `validate()` rejects) is reported with the file path and the key or
+line, and the program exits with an error.
+
+```
+data/
+  cars/baseline.toml           mass, geometry, aero, brakes, powertrain (incl. torque curve), suspension
+  tyres/baseline.toml          mu_static, mu_rolling, mu_breakaway, wheel_radius_m
+  tracks/straight_1000m.csv    braking zones, one per row
+  environments/standard.toml   air density, gravity
+  runs/baseline.toml           picks the files above + time settings + initial state
+  README.md                    what each file is, every key with its unit
+```
+
+Paths inside a file are relative to that file's folder, so runs work from any working directory. The baseline files
+hold exactly the values of the Rust `Default` impls, so the baseline run gives the same results as before the data
+files. To try a change, copy a file, edit the copy and point a run file at it. See [data/README.md](data/README.md)
+for every key and its unit.
+
+---
+
+## 3. Current Physics Architecture
 
 We have a 1D physics model that looks at a vehicle accelerating.
 
@@ -26,7 +57,9 @@ all suspension values finite, the time step stability limit omega_max * time_ste
 and for the powertrain (docs/12): a torque curve of at least 2 points with strictly increasing engine speeds and
 finite torques >= 0 that covers `min_revs` to `max_revs`, `min_revs` < `max_revs`, non-empty strictly decreasing
 gear ratios > 0, final drive > 0, `shift_time` >= 0, `downshift_hysteresis` >= 0, wheel radius > 0, the starting
-gear within the gearbox, all values finite) and panics with the reason if it is invalid.
+gear within the gearbox, all values finite, and braking zones finite with end >= start) and panics with the reason if
+it is invalid. `load_run` runs the same check when the data files are loaded, so a bad file is reported before the
+simulation starts.
 It then computes the two powertrain tables once from the torque curve, gear ratios and wheel radius:
 `clutch_lock_speeds` (docs/12 equation 12.8) and `upshift_speeds` (docs/12 section 12.6, scan in 0.01 m/s steps).
 
@@ -46,9 +79,9 @@ Every cycle (`simulation_step`) executes in this order:
 
 ---
 
-## 3. Engineering Backlog & TODOs
+## 4. Engineering Backlog & TODOs
 
-1. Replace placeholder values with sourced ones: wheelbase and CoG height (`ChassisGeometry`), `mu_rolling` and `mu_breakaway` (`Tyre`), brake bias, suspension (`CornerSuspension` rates, gaps and damping, `pitch_inertia`, static ride heights), powertrain (torque curve, gear ratios, shift time, `Powertrain`).
+1. Replace placeholder values with sourced ones (in `data/cars/baseline.toml` and `data/tyres/baseline.toml`, and the matching `Default` impls): wheelbase and CoG height (`ChassisGeometry`), `mu_rolling` and `mu_breakaway` (`Tyre`), brake bias, suspension (`CornerSuspension` rates, gaps and damping, `pitch_inertia`, static ride heights), powertrain (torque curve, gear ratios, shift time, `Powertrain`).
 2. Add partial brake demand (pedal input below the threshold braking limit).
 3. Split unsprung mass from sprung mass (docs/11 section 11.9 treats all mass as sprung).
 4. Add anti-dive / anti-squat suspension geometry.
