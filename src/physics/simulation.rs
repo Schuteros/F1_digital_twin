@@ -293,6 +293,22 @@ impl SimulationConfig {
             return Err(format!("time_step must be > 0 s, got {}", self.time_step));
         }
 
+        for (index, &(start, end)) in self.track.braking_zones.iter().enumerate() {
+            if !start.is_finite() || !end.is_finite() {
+                return Err(format!(
+                    "track.braking_zones[{}] must be finite, got {} m to {} m",
+                    index, start, end
+                ));
+            }
+
+            if end < start {
+                return Err(format!(
+                    "track.braking_zones[{}] end must be >= start, got {} m < {} m",
+                    index, end, start
+                ));
+            }
+        }
+
         let mass = &self.car.mass;
         let mass_difference = (mass.front + mass.rear - mass.total).abs();
         if mass_difference.is_nan() || mass_difference > MASS_SUM_TOLERANCE {
@@ -1389,6 +1405,16 @@ mod tests {
             ("wheel_radius NaN", |c| c.car.tyre.wheel_radius = f64::NAN),
             ("initial gear 0", |c| c.initial_car.gear = 0),
             ("initial gear above top gear", |c| c.initial_car.gear = 9),
+            // Braking zones
+            ("braking zone end < start", |c| {
+                c.track.braking_zones = vec![(900.0, 1000.0), (1200.0, 1100.0)]
+            }),
+            ("braking zone start NaN", |c| {
+                c.track.braking_zones = vec![(f64::NAN, 1000.0)]
+            }),
+            ("braking zone end infinite", |c| {
+                c.track.braking_zones = vec![(900.0, f64::INFINITY)]
+            }),
         ];
 
         for (name, break_config) in cases {
@@ -1420,7 +1446,14 @@ mod tests {
         simulation_config.car.powertrain.torque_curve =
             vec![(50.0, 300.0), (133.33, 375.0), (250.0, 200.0)];
         simulation_config.car.powertrain.gear_ratios = vec![5.43];
+        // Touching zones and a zero length zone are valid
+        simulation_config.track.braking_zones =
+            vec![(200.0, 300.0), (300.0, 400.0), (450.0, 450.0)];
 
+        assert_eq!(simulation_config.validate(), Ok(()));
+
+        // No braking zones is valid
+        simulation_config.track.braking_zones = vec![];
         assert_eq!(simulation_config.validate(), Ok(()));
     }
 
@@ -1456,6 +1489,13 @@ mod tests {
                 "powertrain.gear_ratios must be strictly decreasing, got 5 at [2] after 4.02"
                     .to_string()
             )
+        );
+
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.track.braking_zones = vec![(900.0, 1000.0), (1200.0, 1100.0)];
+        assert_eq!(
+            simulation_config.validate(),
+            Err("track.braking_zones[1] end must be >= start, got 1100 m < 1200 m".to_string())
         );
     }
 
