@@ -57,11 +57,14 @@ all suspension values finite, the time step stability limit omega_max * time_ste
 and for the powertrain (docs/12): a torque curve of at least 2 points with strictly increasing engine speeds and
 finite torques >= 0 that covers `min_revs` to `max_revs`, `min_revs` < `max_revs`, non-empty strictly decreasing
 gear ratios > 0, final drive > 0, `shift_time` >= 0, `downshift_hysteresis` >= 0, wheel radius > 0, the starting
-gear within the gearbox, all values finite, and braking zones finite with end >= start) and panics with the reason if
-it is invalid. `load_run` runs the same check when the data files are loaded, so a bad file is reported before the
-simulation starts.
+gear within the gearbox, all values finite, braking zones finite with end >= start, and the starting state: speed >= 0,
+shift time left >= 0, distance and suspension state finite) and panics with the reason if it is invalid.
 It then computes the two powertrain tables once from the torque curve, gear ratios and wheel radius:
 `clutch_lock_speeds` (docs/12 equation 12.8) and `upshift_speeds` (docs/12 section 12.6, scan in 0.01 m/s steps).
+Last, it calculates the part of the starting car state that follows from the starting conditions and the config
+(`calculate_initial_car_state`): active braking zone, braking flag, locked engine speed `revs_hz` and acceleration.
+The first step recalculates them the same way, so they don't change the results. `load_run` calls `prepare()` when the
+data files are loaded, so a bad file is reported before the simulation starts and the loaded config is complete.
 
 Every cycle (`simulation_step`) executes in this order:
 

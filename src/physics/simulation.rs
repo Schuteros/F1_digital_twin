@@ -274,6 +274,40 @@ impl SimulationConfig {
             ));
         }
 
+        let initial_car = &self.initial_car;
+        if !initial_car.speed.is_finite() || initial_car.speed < 0.0 {
+            return Err(format!(
+                "initial_car.speed must be >= 0 m/s, got {}",
+                initial_car.speed
+            ));
+        }
+
+        if !initial_car.shift_time_left.is_finite() || initial_car.shift_time_left < 0.0 {
+            return Err(format!(
+                "initial_car.shift_time_left must be >= 0 s, got {}",
+                initial_car.shift_time_left
+            ));
+        }
+
+        let initial_suspension = &initial_car.suspension;
+        for (field, value) in [
+            ("distance", initial_car.distance),
+            ("suspension.heave", initial_suspension.heave),
+            (
+                "suspension.heave_velocity",
+                initial_suspension.heave_velocity,
+            ),
+            ("suspension.pitch", initial_suspension.pitch),
+            ("suspension.pitch_rate", initial_suspension.pitch_rate),
+        ] {
+            if !value.is_finite() {
+                return Err(format!(
+                    "initial_car.{} must be finite, got {}",
+                    field, value
+                ));
+            }
+        }
+
         let wheelbase = self.car.geometry.wheelbase;
         if !wheelbase.is_finite() || wheelbase <= 0.0 {
             return Err(format!(
@@ -378,9 +412,13 @@ impl SimulationConfig {
         Ok(())
     }
 
-    /// Validates the config, then fills the powertrain tables that only depend on car data:
-    /// `clutch_lock_speeds` (docs/12, equation 12.8) and `upshift_speeds` (docs/12 section 12.6).
-    /// Runs once before the simulation (docs/12 section 12.10, before the simulation).
+    /// Validates the config, then fills everything that follows from it:
+    /// * the powertrain tables that only depend on car data: `clutch_lock_speeds`
+    ///   (docs/12, equation 12.8) and `upshift_speeds` (docs/12 section 12.6),
+    /// * the calculated part of `initial_car` (`calculate_initial_car_state`).
+    ///
+    /// Runs before the simulation (docs/12 section 12.10, before the simulation). Running it
+    /// again gives the same result.
     pub fn prepare(&mut self) -> Result<(), String> {
         self.validate()?;
 
@@ -390,8 +428,45 @@ impl SimulationConfig {
         // The upshift scan starts at the clutch lock speeds, so they are filled first
         powertrain.upshift_speeds = calculate_upshift_speeds(powertrain, wheel_radius);
 
+        // The acceleration needs the clutch lock speeds, so the tables are filled first
+        self.initial_car = calculate_initial_car_state(self);
+
         Ok(())
     }
+}
+
+/// Calculates the parts of the starting car state that follow from the starting conditions
+/// (speed, distance, gear, shift time left, suspension state) and the config, the same way a
+/// simulation step does:
+/// * `active_braking_zone` and `braking` from the distance and the track,
+/// * `revs_hz`, the locked engine speed in the starting gear (docs/12, equation 12.2),
+/// * `acceleration`, a_x in the starting gear before any gear change (docs/11 section 11.8).
+///
+/// Needs the powertrain tables filled. The first simulation step recalculates all of these,
+/// so they don't change the results, they only make the starting state consistent.
+fn calculate_initial_car_state(simulation_config: &SimulationConfig) -> CarState {
+    let braking_zones = &simulation_config.track.braking_zones;
+    let mut car_state = simulation_config.initial_car;
+
+    car_state.active_braking_zone = find_active_braking_zone(car_state.distance, braking_zones, 0);
+    car_state.braking = is_braking_zone(
+        braking_zones,
+        car_state.distance,
+        car_state.active_braking_zone,
+    );
+    car_state.revs_hz = calculate_transmission_input_revs(
+        &simulation_config.car.powertrain,
+        simulation_config.car.tyre.wheel_radius,
+        car_state.gear,
+        car_state.speed,
+    );
+    car_state.acceleration = get_car_acceleration(
+        &simulation_config.car,
+        &car_state,
+        &simulation_config.environment,
+    );
+
+    car_state
 }
 
 impl SimulationState {
@@ -610,13 +685,14 @@ mod tests {
     use crate::physics::chassis::{SuspensionState, calculate_tyre_loads, sum_axle_loads};
     use crate::physics::powertrain::{
         Drivetrain, calculate_best_force, calculate_engine_torque, calculate_peak_torque,
-        calculate_total_ratio,
+        calculate_total_ratio, calculate_transmission_input_revs,
     };
     use crate::physics::simulation::{
         SimulationConfig, SimulationState, calculate_total_steps, get_car_acceleration,
         get_car_distance, get_car_speed, simulation_step, start_simulation,
     };
     use crate::physics::states::CarState;
+    use crate::physics::track::Track;
     use crate::physics::tyres::{calculate_current_tyre_friction, calculate_split_force_limit};
 
     /// Largest rounding error in Newtons, N, when a step's powertrain force is recovered from
@@ -1406,6 +1482,27 @@ mod tests {
             ("wheel_radius NaN", |c| c.car.tyre.wheel_radius = f64::NAN),
             ("initial gear 0", |c| c.initial_car.gear = 0),
             ("initial gear above top gear", |c| c.initial_car.gear = 9),
+            // Other starting conditions
+            ("initial speed < 0", |c| c.initial_car.speed = -1.0),
+            ("initial speed NaN", |c| c.initial_car.speed = f64::NAN),
+            ("initial distance infinite", |c| {
+                c.initial_car.distance = f64::INFINITY
+            }),
+            ("initial shift_time_left < 0", |c| {
+                c.initial_car.shift_time_left = -0.001
+            }),
+            ("initial heave NaN", |c| {
+                c.initial_car.suspension.heave = f64::NAN
+            }),
+            ("initial heave_velocity infinite", |c| {
+                c.initial_car.suspension.heave_velocity = f64::INFINITY
+            }),
+            ("initial pitch NaN", |c| {
+                c.initial_car.suspension.pitch = f64::NAN
+            }),
+            ("initial pitch_rate infinite", |c| {
+                c.initial_car.suspension.pitch_rate = f64::NEG_INFINITY
+            }),
             // Braking zones
             ("braking zone end < start", |c| {
                 c.track.braking_zones = vec![(900.0, 1000.0), (1200.0, 1100.0)]
@@ -1528,6 +1625,61 @@ mod tests {
         // One clutch lock speed per gear, one upshift speed per gear except the top gear
         assert_eq!(simulation_config.car.powertrain.clutch_lock_speeds.len(), 8);
         assert_eq!(simulation_config.car.powertrain.upshift_speeds.len(), 7);
+    }
+
+    #[test]
+    fn test_prepare_fills_initial_car_state() {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.track.braking_zones = vec![(100.0, 200.0), (300.0, 400.0)];
+        simulation_config.initial_car.distance = 250.0;
+        simulation_config.initial_car.speed = 20.0;
+        simulation_config.initial_car.gear = 3;
+
+        simulation_config.prepare().unwrap();
+        let initial_car = simulation_config.initial_car;
+
+        // Past the first zone, before the second: the second zone is next, not braking
+        assert_eq!(initial_car.active_braking_zone, 1);
+        assert!(!initial_car.braking);
+        // Locked engine speed in 3rd gear (docs/12, equation 12.2), not the default 0.5 Hz
+        assert_eq!(
+            initial_car.revs_hz,
+            calculate_transmission_input_revs(&simulation_config.car.powertrain, 0.36, 3, 20.0)
+        );
+        // a_x from the starting state, the same calculation the first step makes
+        assert_eq!(
+            initial_car.acceleration,
+            get_car_acceleration(
+                &simulation_config.car,
+                &initial_car,
+                &simulation_config.environment
+            )
+        );
+        assert!(initial_car.acceleration > 0.0);
+
+        // Preparing again gives the same config
+        let mut prepared_twice = prepared(SimulationConfig {
+            track: Track {
+                braking_zones: vec![(100.0, 200.0), (300.0, 400.0)],
+            },
+            initial_car: CarState {
+                distance: 250.0,
+                speed: 20.0,
+                gear: 3,
+                ..CarState::default()
+            },
+            ..SimulationConfig::default()
+        });
+        prepared_twice.prepare().unwrap();
+        assert_eq!(prepared_twice, simulation_config);
+
+        // Inside a zone: braking
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.initial_car.distance = 950.0;
+        simulation_config.prepare().unwrap();
+        assert_eq!(simulation_config.initial_car.active_braking_zone, 0);
+        assert!(simulation_config.initial_car.braking);
+        assert!(simulation_config.initial_car.acceleration < 0.0);
     }
 
     #[test]

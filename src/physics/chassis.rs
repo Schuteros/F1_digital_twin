@@ -88,15 +88,20 @@ impl Default for Suspension {
 }
 
 /// Body motion measured from the static equilibrium (docs/11 section 11.1)
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SuspensionState {
     /// Downward displacement of the CoG from static in meters, m, positive down
+    #[serde(rename = "heave_m")]
     pub heave: f64,
     /// Heave velocity in meters per second, m/s, positive down
+    #[serde(rename = "heave_velocity_m_per_s")]
     pub heave_velocity: f64,
     /// Rotation of the body from its static attitude in radians, rad, positive nose down
+    #[serde(rename = "pitch_rad")]
     pub pitch: f64,
     /// Pitch rate in radians per second, rad/s, positive nose down
+    #[serde(rename = "pitch_rate_rad_per_s")]
     pub pitch_rate: f64,
 }
 

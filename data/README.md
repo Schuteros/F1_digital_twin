@@ -46,13 +46,29 @@ gives the same results as the code defaults.
 | `end_time_s` | s | End time of the simulation (it also stops when the car has braked to a stop) |
 | `time_step_s` | s | Time step. Must be > 0 and satisfy the suspension stability limit omega_max * time_step < 2 (docs/11 section 11.8) |
 
-`[initial_state]`: the car at `start_time_s`. The suspension starts at rest (static equilibrium).
+`[initial_state]`: the starting conditions of the car at `start_time_s`.
 
 | Key | Unit | Meaning |
 |---|---|---|
-| `speed_m_per_s` | m/s | Speed |
+| `speed_m_per_s` | m/s | Speed, >= 0 |
 | `distance_m` | m | Distance along the track |
 | `gear` | | Gear, 1 is first gear. Must exist in `gear_ratios` |
+| `shift_time_left_s` | s | Time left of a gear shift in progress, >= 0. `0.0` = not shifting |
+
+`[initial_state.suspension]`: body motion measured from static equilibrium (docs/11). All `0.0` = at rest.
+
+| Key | Unit | Meaning |
+|---|---|---|
+| `heave_m` | m | Downward displacement of the CoG from static, positive down |
+| `heave_velocity_m_per_s` | m/s | Heave velocity, positive down |
+| `pitch_rad` | rad | Body rotation from static, positive nose down |
+| `pitch_rate_rad_per_s` | rad/s | Pitch rate, positive nose down |
+
+The rest of the car state is not written in the file, because it follows from the values above
+and the car, track and environment. It is calculated before the run starts
+(`SimulationConfig::prepare`): the active braking zone and whether the car is braking (from
+`distance_m` and the track), the locked engine speed (from speed and gear, docs/12 equation 12.2)
+and the acceleration. Writing one of them (e.g. `revs_hz`) is an unknown key error.
 
 ## Car file (`cars/*.toml`)
 
@@ -93,7 +109,7 @@ gives the same results as the code defaults.
 
 | Key | Unit | Meaning |
 |---|---|---|
-| `torque_curve_Hz_N_m` | [Hz, N·m] | Full-throttle torque curve as `[engine speed, torque]` pairs, engine speeds strictly increasing, torques >= 0. Must cover `min_revs_Hz` to `max_revs_Hz` |
+| `torque_curve_Hz_and_N_m` | [Hz, N·m] | Full-throttle torque curve as `[engine speed, torque]` pairs, engine speeds strictly increasing, torques >= 0. Must cover `min_revs_Hz` to `max_revs_Hz` |
 | `max_revs_Hz` | Hz | Rev limit |
 | `min_revs_Hz` | Hz | Lowest engine speed before stalling, < `max_revs_Hz` |
 | `gear_ratios` | | Gear ratios, first gear first, strictly decreasing, > 0 |

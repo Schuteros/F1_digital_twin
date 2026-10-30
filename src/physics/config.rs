@@ -57,23 +57,9 @@ struct RunFile {
     /// Time step of the simulation in seconds, s
     #[serde(rename = "time_step_s")]
     time_step: f64,
-    /// State of the car at the start time
-    initial_state: InitialState,
-}
-
-/// Starting values of the car state that a run file sets. The rest of `CarState` is output
-/// or recalculated every step, so it starts from `CarState::default()`.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct InitialState {
-    /// Speed in meters per second, m/s
-    #[serde(rename = "speed_m_per_s")]
-    speed: f64,
-    /// Distance along the track in meters, m
-    #[serde(rename = "distance_m")]
-    distance: f64,
-    /// Gear, 1 is the first gear
-    gear: u8,
+    /// Starting conditions of the car at the start time. The calculated fields of `CarState`
+    /// are not in the file, `SimulationConfig::prepare` fills them.
+    initial_state: CarState,
 }
 
 /// Car file: every `Car` section except the tyres, which come from their own file
@@ -99,8 +85,10 @@ struct CarFile {
     suspension: Suspension,
 }
 
-/// Loads a run file and every file it points to, and checks the result with
-/// `SimulationConfig::validate`, so the returned config is always valid.
+/// Loads a run file and every file it points to, then runs `SimulationConfig::prepare`:
+/// it validates the config and calculates everything that follows from it (the shift tables
+/// and the calculated part of the starting car state). The returned config is always valid
+/// and complete.
 ///
 /// Returns a message naming the file (and the key or CSV line when there is one) on error.
 pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
@@ -119,13 +107,8 @@ pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
     let environment: Environment = load_flat_toml(&run_folder.join(&run.environment))?;
     let track = load_track(&run_folder.join(&run.track))?;
 
-    let simulation_config = SimulationConfig {
-        initial_car: CarState {
-            speed: run.initial_state.speed,
-            distance: run.initial_state.distance,
-            gear: run.initial_state.gear,
-            ..CarState::default()
-        },
+    let mut simulation_config = SimulationConfig {
+        initial_car: run.initial_state,
         car: Car {
             mass: car.mass,
             powertrain: car.powertrain,
@@ -143,7 +126,7 @@ pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
     };
 
     simulation_config
-        .validate()
+        .prepare()
         .map_err(|message| format!("{}: invalid config: {}", path.display(), message))?;
 
     Ok(simulation_config)
@@ -283,12 +266,15 @@ mod tests {
         data_folder().join("runs").join("baseline.toml")
     }
 
-    /// The config main.rs built before data files existed
+    /// The config main.rs built before data files existed, prepared like `load_run` does
+    /// (start_simulation always prepared it before the first step)
     fn expected_baseline() -> SimulationConfig {
-        SimulationConfig {
+        let mut simulation_config = SimulationConfig {
             end_time: 100000.0,
             ..SimulationConfig::default()
-        }
+        };
+        simulation_config.prepare().unwrap();
+        simulation_config
     }
 
     /// A folder in the system temp folder holding a copy of the baseline data files, laid out
@@ -359,6 +345,17 @@ mod tests {
     fn test_baseline_equals_defaults() {
         let loaded = load_run(&baseline_run()).unwrap();
         let expected = expected_baseline();
+
+        // The starting conditions in the run file are exactly CarState::default()
+        let default_car_state = CarState::default();
+        assert_eq!(loaded.initial_car.speed, default_car_state.speed);
+        assert_eq!(loaded.initial_car.distance, default_car_state.distance);
+        assert_eq!(loaded.initial_car.gear, default_car_state.gear);
+        assert_eq!(
+            loaded.initial_car.shift_time_left,
+            default_car_state.shift_time_left
+        );
+        assert_eq!(loaded.initial_car.suspension, default_car_state.suspension);
 
         // Every field, exact float equality: the files must hold the exact Default values
         assert_eq!(loaded.initial_car, expected.initial_car);
@@ -442,28 +439,49 @@ mod tests {
     #[test]
     fn test_initial_state_from_run_file() {
         let data = TempData::new("initial_state");
-        data.replace(
-            "runs/baseline.toml",
-            "speed_m_per_s = 10.0",
-            "speed_m_per_s = 0.0",
-        );
-        data.replace(
-            "runs/baseline.toml",
-            "distance_m = 100.0",
-            "distance_m = 0.0",
-        );
-        data.replace("runs/baseline.toml", "gear = 1", "gear = 2");
+        let run = "runs/baseline.toml";
+        data.replace(run, "speed_m_per_s = 10.0", "speed_m_per_s = 30.0");
+        // Inside the 900 m to 1000 m braking zone
+        data.replace(run, "distance_m = 100.0", "distance_m = 950.0");
+        data.replace(run, "gear = 1", "gear = 2");
+        data.replace(run, "shift_time_left_s = 0.0", "shift_time_left_s = 0.003");
+        data.replace(run, "pitch_rad = 0.0", "pitch_rad = 0.001");
 
-        // The rest of the state starts from the default
-        assert_eq!(
-            load_run(&data.run()).unwrap().initial_car,
-            CarState {
-                speed: 0.0,
-                distance: 0.0,
-                gear: 2,
-                ..CarState::default()
-            }
+        let simulation_config = load_run(&data.run()).unwrap();
+        let initial_car = simulation_config.initial_car;
+
+        // Starting conditions come from the file
+        assert_eq!(initial_car.speed, 30.0);
+        assert_eq!(initial_car.distance, 950.0);
+        assert_eq!(initial_car.gear, 2);
+        assert_eq!(initial_car.shift_time_left, 0.003);
+        assert_eq!(initial_car.suspension.pitch, 0.001);
+        assert_eq!(initial_car.suspension.heave, 0.0);
+
+        // The rest is calculated from them, not left at the defaults
+        assert_eq!(initial_car.active_braking_zone, 0);
+        assert!(initial_car.braking);
+        // n = v * i_2 * i_f / (2 * pi * r) = 30 * 4.02 * 3.0 / (2 * pi * 0.36) = 159.95 Hz
+        assert!(
+            (initial_car.revs_hz - 159.9507).abs() < 1e-3,
+            "{}",
+            initial_car.revs_hz
         );
+        // Braking, so the car decelerates
+        assert!(
+            initial_car.acceleration < 0.0,
+            "{}",
+            initial_car.acceleration
+        );
+    }
+
+    #[test]
+    fn test_calculated_initial_state_not_in_file() {
+        // Calculated fields are not starting conditions, so writing one is an error
+        let data = TempData::new("calculated_in_file");
+        data.replace("runs/baseline.toml", "gear = 1", "gear = 1\nrevs_hz = 72.0");
+        let message = load_run(&data.run()).unwrap_err();
+        assert!(message.contains("unknown field `revs_hz`"), "{}", message);
     }
 
     #[test]
