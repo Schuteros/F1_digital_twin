@@ -15,6 +15,7 @@ use crate::physics::states::CarState;
 use crate::physics::track::{Track, find_active_braking_zone, is_braking_zone};
 
 /// Holds all the values needed for the simulation
+#[derive(Debug, PartialEq)]
 pub(crate) struct SimulationState {
     pub(crate) car: CarState,
     pub(crate) time: f64, // Seconds (s)

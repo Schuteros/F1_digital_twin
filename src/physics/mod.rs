@@ -2,6 +2,7 @@ mod aero;
 pub mod braking;
 mod car;
 mod chassis;
+pub mod config;
 mod environment;
 mod forces;
 mod integrators;
