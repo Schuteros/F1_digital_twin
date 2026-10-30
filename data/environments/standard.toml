@@ -1,0 +1,6 @@
+# Standard conditions: the same values as Environment::default().
+format_version = 1
+
+# Sea level air at 15 °C
+air_density_kg_per_m3 = 1.225
+g_acceleration_m_per_s2 = 9.81

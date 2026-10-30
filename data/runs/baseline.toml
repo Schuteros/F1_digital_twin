@@ -1,0 +1,23 @@
+# Baseline run: the same config main.rs used before data files
+# (SimulationConfig { end_time: 100000.0, ..Default::default() }).
+# Start it with: cargo run -- data/runs/baseline.toml
+format_version = 1
+
+# Paths are relative to this file's folder
+car = "../cars/baseline.toml"
+# Optional: without it, the car's default_tyres is used
+tyres = "../tyres/baseline.toml"
+track = "../tracks/straight_1000m.csv"
+environment = "../environments/standard.toml"
+
+start_time_s = 0.0
+end_time_s = 100000.0
+# Must satisfy the suspension stability limit omega_max * time_step < 2 (docs/11 section 11.8)
+time_step_s = 0.001
+
+# State of the car at start_time_s. The suspension starts at rest (static equilibrium).
+# These match CarState::default(): the car is already rolling at 10 m/s, 100 m in.
+[initial_state]
+speed_m_per_s = 10.0
+distance_m = 100.0
+gear = 1

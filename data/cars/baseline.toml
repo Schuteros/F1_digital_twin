@@ -1,0 +1,97 @@
+# Baseline car: the same values as the Rust Default impls (Car::default()).
+# Units are in the key names, see data/README.md for every key.
+format_version = 1
+
+# Tyres used when the run file has no `tyres` key. Relative to this file's folder.
+default_tyres = "../tyres/baseline.toml"
+
+# Mass distribution. front_kg + rear_kg must equal total_kg.
+# The static weight split also sets the CoG position (docs/10 section 10.6).
+[mass]
+total_kg = 815.494393476
+front_kg = 407.747196738
+rear_kg = 407.747196738
+
+# Chassis dimensions for load transfer and the suspension model (docs/10, docs/11).
+# Placeholder values: verify against current F1 regulations / sources.
+[geometry]
+wheelbase_m = 3.4
+cog_height_m = 0.3
+
+# Air drag (docs/04). No downforce yet.
+[aero]
+drag_coefficient = 0.35
+frontal_area_m2 = 2.0
+
+# Threshold braking with a fixed bias (docs/09).
+# front_bias is the fraction of the brake force on the front axle, 0.0..=1.0.
+[brakes]
+front_bias = 0.575
+
+# Engine, gearbox and shifting (docs/12).
+# Estimates for a 2026-style F1 engine without the MGU-K (docs/12 section 12.9).
+# Placeholder values: replace with sourced ones.
+[powertrain]
+# Full-throttle torque curve as [engine speed in Hz, torque in N·m] points, sorted by
+# engine speed. It must cover min_revs_Hz to max_revs_Hz.
+torque_curve_Hz_N_m = [
+    [66.67, 300.0],
+    [100.0, 360.0],
+    [133.33, 375.0],
+    [175.0, 364.0],
+    [200.0, 318.0],
+    [216.67, 250.0],
+]
+max_revs_Hz = 216.67
+min_revs_Hz = 66.67
+# 1st gear first, strictly decreasing
+gear_ratios = [5.43, 4.02, 3.29, 2.78, 2.41, 2.13, 1.87, 1.65]
+final_drive = 3.0
+shift_time_s = 0.005
+downshift_hysteresis_m_per_s = 0.5
+
+# Which axles are driven. The type is "rear_wheel_drive", "front_wheel_drive", or
+# "all_wheel_drive" together with front_torque_split (0.0..=1.0, the front share).
+[powertrain.drivetrain]
+type = "rear_wheel_drive"
+
+# Body heave and pitch on four spring-damper corners (docs/11).
+# Placeholder values: replace with sourced values.
+[suspension]
+pitch_inertia_kg_m2 = 1_000.0
+static_ride_height_front_m = 0.030
+static_ride_height_rear_m = 0.060
+
+# Each corner: wheel rate, damping and end stops, all measured at the wheel.
+# Placeholder values: replace with sourced values.
+[suspension.front_left]
+spring_rate_N_per_m = 130_000.0
+damping_N_s_per_m = 5_000.0
+bump_gap_m = 0.015
+bump_rate_N_per_m = 1_000_000.0
+droop_gap_m = 0.030
+droop_rate_N_per_m = 1_000_000.0
+
+[suspension.front_right]
+spring_rate_N_per_m = 130_000.0
+damping_N_s_per_m = 5_000.0
+bump_gap_m = 0.015
+bump_rate_N_per_m = 1_000_000.0
+droop_gap_m = 0.030
+droop_rate_N_per_m = 1_000_000.0
+
+[suspension.rear_left]
+spring_rate_N_per_m = 130_000.0
+damping_N_s_per_m = 5_000.0
+bump_gap_m = 0.015
+bump_rate_N_per_m = 1_000_000.0
+droop_gap_m = 0.030
+droop_rate_N_per_m = 1_000_000.0
+
+[suspension.rear_right]
+spring_rate_N_per_m = 130_000.0
+damping_N_s_per_m = 5_000.0
+bump_gap_m = 0.015
+bump_rate_N_per_m = 1_000_000.0
+droop_gap_m = 0.030
+droop_rate_N_per_m = 1_000_000.0
