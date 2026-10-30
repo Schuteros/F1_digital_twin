@@ -1,8 +1,11 @@
 //! Functions related to tyre physics
 
 use crate::physics::loads::AxleLoads;
+use serde::Deserialize;
 
 /// Model defines the tyres used to simulate the car
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tyre {
     /// mu static friction which limits traction of the wheel
     pub mu_static: f64,
@@ -13,7 +16,8 @@ pub struct Tyre {
     /// mu breakaway friction is the friction that needs to be overcome to start moving the car
     pub mu_breakaway: f64,
 
-    /// wheel radius
+    /// wheel radius in meters, m
+    #[serde(rename = "wheel_radius_m")]
     pub wheel_radius: f64,
 }
 

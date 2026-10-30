@@ -1,6 +1,6 @@
 use crate::physics::chassis::SuspensionState;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CarState {
     pub speed: f64,
     pub distance: f64,

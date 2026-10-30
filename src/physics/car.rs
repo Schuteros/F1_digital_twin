@@ -5,8 +5,10 @@ use crate::physics::braking::Brakes;
 use crate::physics::chassis::Suspension;
 use crate::physics::powertrain::Powertrain;
 use crate::physics::tyres::Tyre;
+use serde::Deserialize;
 
 /// Contains all the variables that define the car needed to be simulated
+#[derive(Debug, PartialEq)]
 pub struct Car {
     /// Contains data about mass distribution
     pub mass: Mass,
@@ -31,12 +33,17 @@ pub struct Car {
 }
 
 /// Contains mass distribution data
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Mass {
     /// Total mass of the car in kilograms, kg
+    #[serde(rename = "total_kg")]
     pub total: f64,
     /// Mass on the rear axle in kilograms, kg
+    #[serde(rename = "rear_kg")]
     pub rear: f64,
     /// Mass on the front axle in kilograms, kg
+    #[serde(rename = "front_kg")]
     pub front: f64,
 }
 
@@ -44,10 +51,14 @@ pub struct Mass {
 ///
 /// CoG to axle distances (l_f, l_r) are not stored here: they follow from the
 /// front/rear split in `Mass`, so the static weight distribution has one source of truth.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChassisGeometry {
     /// Distance between the front and rear axle in meters, m
+    #[serde(rename = "wheelbase_m")]
     pub wheelbase: f64,
     /// Height of the centre of gravity above the ground in meters, m
+    #[serde(rename = "cog_height_m")]
     pub cog_height: f64,
 }
 

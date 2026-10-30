@@ -6,20 +6,29 @@
 use crate::physics::car::{Car, ChassisGeometry, Mass};
 use crate::physics::integrators::euler;
 use crate::physics::loads::{AxleLoads, calculate_static_axle_loads};
+use serde::Deserialize;
 
 /// Spring, damper and end stops of one suspension corner, all measured at the wheel
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CornerSuspension {
     /// Wheel rate (spring rate at the wheel, motion ratio included) in Newtons per meter, N/m
+    #[serde(rename = "spring_rate_N_per_m")]
     pub spring_rate: f64,
     /// Damping coefficient at the wheel in Newton seconds per meter, N·s/m
+    #[serde(rename = "damping_N_s_per_m")]
     pub damping: f64,
     /// Compression travel from static before the bump stop touches in meters, m
+    #[serde(rename = "bump_gap_m")]
     pub bump_gap: f64,
     /// Bump stop stiffness at the wheel in Newtons per meter, N/m
+    #[serde(rename = "bump_rate_N_per_m")]
     pub bump_rate: f64,
     /// Extension travel from static before the droop limiter engages in meters, m
+    #[serde(rename = "droop_gap_m")]
     pub droop_gap: f64,
     /// Droop stop stiffness at the wheel in Newtons per meter, N/m
+    #[serde(rename = "droop_rate_N_per_m")]
     pub droop_rate: f64,
 }
 
@@ -41,6 +50,8 @@ impl Default for CornerSuspension {
 ///
 /// CoG to axle distances (d_f, d_r) are not stored here: they follow from the front/rear
 /// split in `Mass`, like in docs/10 section 10.6, so there is one source of truth.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Suspension {
     /// Front left corner
     pub front_left: CornerSuspension,
@@ -51,10 +62,13 @@ pub struct Suspension {
     /// Rear right corner
     pub rear_right: CornerSuspension,
     /// Pitch moment of inertia of the body about its CoG in kilogram meters squared, kg·m^2
+    #[serde(rename = "pitch_inertia_kg_m2")]
     pub pitch_inertia: f64,
     /// Front ride height with the car standing still on level ground in meters, m
+    #[serde(rename = "static_ride_height_front_m")]
     pub static_ride_height_front: f64,
     /// Rear ride height with the car standing still on level ground in meters, m
+    #[serde(rename = "static_ride_height_rear_m")]
     pub static_ride_height_rear: f64,
 }
 

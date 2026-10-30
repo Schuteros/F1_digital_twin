@@ -21,6 +21,7 @@ pub(crate) struct SimulationState {
 }
 
 /// Holds all the initial values to start simulation
+#[derive(Debug, PartialEq)]
 pub struct SimulationConfig {
     /// Initial state of the car at the start of the simulation
     pub initial_car: CarState,

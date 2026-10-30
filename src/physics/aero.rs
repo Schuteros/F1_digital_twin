@@ -1,11 +1,16 @@
 //! Functions related to the aerodynamic forces
 
+use serde::Deserialize;
+
 /// Contains all the info about the aerodynamics of the car
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Aero {
     /// drag coefficient of the car
     pub drag_coefficient: f64,
 
-    /// frontal area of the car
+    /// frontal area of the car in square meters, m^2
+    #[serde(rename = "frontal_area_m2")]
     pub frontal_area: f64,
 }
 

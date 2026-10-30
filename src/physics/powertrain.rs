@@ -5,6 +5,7 @@
 //! [Clutch Dynamics Documentation](../../docs/08_Clutch_Dynamics.MD)
 //! [Torque Curve and Shifting Documentation](../../docs/12_Torque_Curve_and_Shifting.MD)
 
+use serde::Deserialize;
 use std::f64::consts::PI;
 
 /// Speed step of the upshift scan in meters per second, m/s (docs/12 section 12.6)
@@ -15,37 +16,48 @@ const UPSHIFT_SCAN_STEP: f64 = 0.01;
 const SHIFT_TIMER_TOLERANCE: f64 = 1e-9;
 
 /// Contains all the variables that define the powertrain
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Powertrain {
     /// Full-throttle torque curve as points of (engine speed in Hertz, Hz, torque in Newton
     /// meters, N·m), sorted by engine speed (docs/12 section 12.2)
+    #[serde(rename = "torque_curve_Hz_N_m")]
     pub torque_curve: Vec<(f64, f64)>,
     /// Max rotational speed of the engine (rev limit) in Hertz, Hz
+    #[serde(rename = "max_revs_Hz")]
     pub max_revs: f64,
     /// Min rotational speed of the engine before stalling in Hertz, Hz
+    #[serde(rename = "min_revs_Hz")]
     pub min_revs: f64,
     /// Gear ratios from largest to smallest, dimensionless
     pub gear_ratios: Vec<f64>,
     /// Final drive ratio, dimensionless
     pub final_drive: f64,
     /// Time without drive during a gear shift in seconds, s (docs/12 section 12.8)
+    #[serde(rename = "shift_time_s")]
     pub shift_time: f64,
     /// Downshift hysteresis in meters per second, m/s (docs/12, equation 12.14)
+    #[serde(rename = "downshift_hysteresis_m_per_s")]
     pub downshift_hysteresis: f64,
     /// Optimal upshift speed from each gear to the next in meters per second, m/s, one per gear
-    /// except the top gear (docs/12 section 12.6). Empty in Default, filled by
-    /// `SimulationConfig::prepare` before the simulation starts.
+    /// except the top gear (docs/12 section 12.6). Empty in Default and in a loaded config,
+    /// filled by `SimulationConfig::prepare` before the simulation starts.
+    #[serde(skip)]
     pub upshift_speeds: Vec<f64>,
     /// Speed above which the clutch stays locked in each gear in meters per second, m/s, one
-    /// per gear (docs/12, equation 12.8). Empty in Default, filled by
+    /// per gear (docs/12, equation 12.8). Empty in Default and in a loaded config, filled by
     /// `SimulationConfig::prepare` before the simulation starts.
+    #[serde(skip)]
     pub clutch_lock_speeds: Vec<f64>,
     /// Which axles the powertrain drives
     pub drivetrain: Drivetrain,
 }
 
 /// Defines which axles receive the powertrain force
-// Full names are kept for readability. FWD / AWD are config options, main.rs only uses the default.
-#[allow(clippy::enum_variant_names, dead_code)]
+// Full names are kept for readability.
+#[allow(clippy::enum_variant_names)]
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(from = "DrivetrainFile")]
 pub enum Drivetrain {
     /// All powertrain force goes to the front axle
     FrontWheelDrive,
@@ -57,6 +69,40 @@ pub enum Drivetrain {
         /// (rear gets 1 - front_torque_split)
         front_torque_split: f64,
     },
+}
+
+/// `Drivetrain` as it is written in a car file: a table with `type` and, for all wheel drive,
+/// `front_torque_split`.
+///
+/// Serde ignores extra keys on unit variants of a tagged enum, even with `deny_unknown_fields`,
+/// so the file variants are empty structs. That way a `front_torque_split` on a rear wheel
+/// drive car is an error instead of a silently ignored key.
+#[allow(clippy::enum_variant_names)]
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum DrivetrainFile {
+    /// All powertrain force goes to the front axle
+    FrontWheelDrive {},
+    /// All powertrain force goes to the rear axle
+    RearWheelDrive {},
+    /// Powertrain force is split between both axles
+    AllWheelDrive {
+        /// Fraction of the powertrain force sent to the front axle, dimensionless, 0.0..=1.0
+        front_torque_split: f64,
+    },
+}
+
+impl From<DrivetrainFile> for Drivetrain {
+    /// Converts the file form into the `Drivetrain` used by the simulation
+    fn from(file: DrivetrainFile) -> Self {
+        match file {
+            DrivetrainFile::FrontWheelDrive {} => Drivetrain::FrontWheelDrive,
+            DrivetrainFile::RearWheelDrive {} => Drivetrain::RearWheelDrive,
+            DrivetrainFile::AllWheelDrive { front_torque_split } => {
+                Drivetrain::AllWheelDrive { front_torque_split }
+            }
+        }
+    }
 }
 
 impl Drivetrain {

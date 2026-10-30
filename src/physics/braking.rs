@@ -5,8 +5,11 @@
 
 use crate::physics::loads::AxleLoads;
 use crate::physics::tyres::calculate_split_force_limit;
+use serde::Deserialize;
 
 /// Contains the brake system settings
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Brakes {
     /// Fraction of the braking force applied at the front axle, dimensionless, 0.0..=1.0
     /// (rear gets 1 - front_bias)
