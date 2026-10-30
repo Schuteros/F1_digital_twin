@@ -21,7 +21,7 @@ const SHIFT_TIMER_TOLERANCE: f64 = 1e-9;
 pub struct Powertrain {
     /// Full-throttle torque curve as points of (engine speed in Hertz, Hz, torque in Newton
     /// meters, N·m), sorted by engine speed (docs/12 section 12.2)
-    #[serde(rename = "torque_curve_Hz_N_m")]
+    #[serde(rename = "torque_curve_Hz_and_N_m")]
     pub torque_curve: Vec<(f64, f64)>,
     /// Max rotational speed of the engine (rev limit) in Hertz, Hz
     #[serde(rename = "max_revs_Hz")]

@@ -34,7 +34,7 @@ front_bias = 0.575
 [powertrain]
 # Full-throttle torque curve as [engine speed in Hz, torque in N·m] points, sorted by
 # engine speed. It must cover min_revs_Hz to max_revs_Hz.
-torque_curve_Hz_N_m = [
+torque_curve_Hz_and_N_m = [
     [66.67, 300.0],
     [100.0, 360.0],
     [133.33, 375.0],
