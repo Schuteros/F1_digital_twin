@@ -1,3 +1,4 @@
+use crate::physics::aero::calculate_aero_loads;
 use crate::physics::car::Car;
 use crate::physics::chassis::{
     CornerSuspension, calculate_axle_distances, calculate_body_accelerations_from_state,
@@ -353,6 +354,25 @@ impl SimulationConfig {
             ));
         }
 
+        let aero = &self.car.aero;
+        for (field, value) in [
+            ("downforce_coefficient", aero.downforce_coefficient),
+            (
+                "downforce_centre_of_pressure_from_front_axle",
+                aero.downforce_centre_of_pressure_from_front_axle,
+            ),
+            (
+                "drag_centre_of_pressure_height",
+                aero.drag_centre_of_pressure_height,
+            ),
+        ] {
+            // Any finite value is allowed: C_down < 0 is lift, and the centre of pressure may
+            // lie outside the wheelbase (docs/13 section 13.5)
+            if !value.is_finite() {
+                return Err(format!("aero.{} must be finite, got {}", field, value));
+            }
+        }
+
         let suspension = &self.car.suspension;
         for (name, corner) in [
             ("front_left", &suspension.front_left),
@@ -586,12 +606,19 @@ fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &S
         );
     }
 
-    // Step 5: body accelerations from the same suspension state and this step's a_x
+    // Step 5: aero forces from the speed at the start of the step (docs/13 section 13.5), then
+    // body accelerations from the same suspension state, this step's a_x and the aero forces
+    let aero_loads = calculate_aero_loads(
+        &simulation_config.car.aero,
+        simulation_config.environment.air_density,
+        simulation_state.car.speed,
+    );
     let body_accelerations = calculate_body_accelerations_from_state(
         &simulation_config.car,
         &simulation_state.car.suspension,
         simulation_config.environment.g_acceleration,
         simulation_state.car.acceleration,
+        &aero_loads,
     );
 
     // Step 6: update velocities
@@ -681,6 +708,7 @@ pub fn start_simulation(
 
 #[cfg(test)]
 mod tests {
+    use crate::physics::aero::calculate_aero_loads;
     use crate::physics::aero::calculate_air_drag;
     use crate::physics::chassis::{SuspensionState, calculate_tyre_loads, sum_axle_loads};
     use crate::physics::powertrain::{
@@ -961,6 +989,9 @@ mod tests {
         // This test checks the time stepping only, so load transfer is switched off (CoG on the
         // ground: no pitch moment, the suspension stays at static and the axle loads are static).
         simulation_config.car.geometry.cog_height = 0.0;
+        // Same for the aero loads (docs/13): no downforce, drag acting at ground level
+        simulation_config.car.aero.downforce_coefficient = 0.0;
+        simulation_config.car.aero.drag_centre_of_pressure_height = 0.0;
         // Time steps up to 5.5 s need a suspension that passes the stability limit
         // (docs/11 section 11.8): 1 N/m springs and no end stops give
         // omega_pitch = sqrt(4 * 1 N/m * 1.7^2 m^2 / 1000 kg·m^2) = 0.108 rad/s -> 0.59 at 5.5 s < 2
@@ -1370,6 +1401,15 @@ mod tests {
                 c.car.suspension.front_right.spring_rate = f64::NAN
             }),
             ("damping < 0", |c| c.car.suspension.rear_left.damping = -1.0),
+            ("downforce coefficient NaN", |c| {
+                c.car.aero.downforce_coefficient = f64::NAN
+            }),
+            ("centre of pressure infinite", |c| {
+                c.car.aero.downforce_centre_of_pressure_from_front_axle = f64::INFINITY
+            }),
+            ("drag height NaN", |c| {
+                c.car.aero.drag_centre_of_pressure_height = f64::NAN
+            }),
             ("damping infinite", |c| {
                 c.car.suspension.rear_left.damping = f64::INFINITY
             }),
@@ -1700,9 +1740,55 @@ mod tests {
     }
 
     #[test]
+    fn test_downforce_lowers_car_and_adds_tyre_load() {
+        // docs/13 section 13.7, test 7: accelerate with the default (placeholder) aero until
+        // 50 m/s. Downforce there: 0.5 * 1.225 * 1.0 * 2.0 * 50^2 = 3062.5 N
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.track.braking_zones = vec![];
+        let simulation_config = prepared(simulation_config);
+        let g_acceleration = simulation_config.environment.g_acceleration;
+        let weight = simulation_config.car.mass.total * g_acceleration;
+
+        let mut simulation_state = SimulationState::new(&simulation_config);
+        let mut steps = 0;
+        while simulation_state.car.speed < 50.0 {
+            simulation_step(&mut simulation_state, &simulation_config);
+            steps += 1;
+            assert!(steps < 60_000, "Car never reached 50 m/s");
+        }
+
+        let suspension = simulation_state.car.suspension;
+        let loads = sum_axle_loads(&calculate_tyre_loads(
+            &simulation_config.car,
+            &suspension,
+            g_acceleration,
+        ));
+        let downforce = calculate_aero_loads(
+            &simulation_config.car.aero,
+            simulation_config.environment.air_density,
+            simulation_state.car.speed,
+        )
+        .downforce;
+
+        // The springs carry the downforce: the body has moved down and the tyres carry
+        // about weight + downforce (the body lags slightly behind the rising downforce)
+        assert!(suspension.heave > 0.0, "{:?}", suspension);
+        assert!(
+            (loads.total() - (weight + downforce)).abs() < 0.05 * downforce,
+            "{:?}, expected about {} N",
+            loads,
+            weight + downforce
+        );
+    }
+
+    #[test]
     fn test_braking_dives_and_settles_after_stop() {
         let mut simulation_config = SimulationConfig::default();
         simulation_config.track.braking_zones = vec![(0.0, 1000.0)];
+        // This test checks the braking dive only, so the aero loads are switched off
+        // (docs/13): downforce would heave the body and the drag would pitch it
+        simulation_config.car.aero.downforce_coefficient = 0.0;
+        simulation_config.car.aero.drag_centre_of_pressure_height = 0.0;
         let simulation_config = prepared(simulation_config);
         let g_acceleration = simulation_config.environment.g_acceleration;
 

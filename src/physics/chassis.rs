@@ -3,6 +3,7 @@
 //! All motion is measured from the static equilibrium (docs/11 section 11.2), so the state
 //! starts at zero and the static loads never enter the body equations.
 
+use crate::physics::aero::{Aero, AeroLoads};
 use crate::physics::car::{Car, ChassisGeometry, Mass};
 use crate::physics::integrators::euler;
 use crate::physics::loads::{AxleLoads, calculate_static_axle_loads};
@@ -376,14 +377,36 @@ pub(crate) fn calculate_axle_forces(corner_forces: &CornerForces) -> AxleForces 
     }
 }
 
-/// Calculates heave and pitch accelerations of the body (docs/11, equations 11.12 and 11.13).
+/// Where the aerodynamic forces act, measured from the CoG (docs/13 section 13.2)
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AeroPoints {
+    /// Horizontal distance of the downforce centre of pressure ahead of the CoG (e_cp) in
+    /// meters, m. Negative = behind the CoG.
+    pub downforce_ahead_of_cog: f64,
+    /// Height of the drag centre of pressure above the ground (h_drag) in meters, m
+    pub drag_height: f64,
+}
+
+/// Calculates where the aero forces act relative to the CoG: e_cp = d_f - x_cp (docs/13, equation 13.2)
+pub(crate) fn calculate_aero_points(aero: &Aero, distances: &AxleDistances) -> AeroPoints {
+    AeroPoints {
+        downforce_ahead_of_cog: distances.front - aero.downforce_centre_of_pressure_from_front_axle,
+        drag_height: aero.drag_centre_of_pressure_height,
+    }
+}
+
+/// Calculates heave and pitch accelerations of the body (docs/11, equations 11.12 and 11.13,
+/// with the aero terms of docs/13, equations 13.3 and 13.4).
 ///
 /// * `mass_total` - total (sprung) mass in kilograms, kg
 /// * `pitch_inertia` - pitch moment of inertia about the CoG in kilogram meters squared, kg·m^2
 /// * `cog_height` - CoG height above the ground in meters, m
 /// * `longitudinal_acceleration` - a_x in meters per second squared, m/s^2, positive forward
+/// * `aero_loads` - drag and downforce in Newtons, N
+/// * `aero_points` - where drag and downforce act (`calculate_aero_points`)
 ///
 /// `axle_forces` must be the clamped values, the same ones that go into the tyre loads.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn calculate_body_accelerations(
     mass_total: f64,
     pitch_inertia: f64,
@@ -391,11 +414,16 @@ pub(crate) fn calculate_body_accelerations(
     distances: &AxleDistances,
     longitudinal_acceleration: f64,
     axle_forces: &AxleForces,
+    aero_loads: &AeroLoads,
+    aero_points: &AeroPoints,
 ) -> BodyAccelerations {
-    // m * a_z = -(F_f + F_r) (11.12)
-    let heave_acceleration = -(axle_forces.front + axle_forces.rear) / mass_total;
-    // J * alpha = -m * a_x * h - d_f * F_f + d_r * F_r (11.13)
+    // m * a_z = -(F_f + F_r) + F_down (13.3)
+    let heave_acceleration =
+        (-(axle_forces.front + axle_forces.rear) + aero_loads.downforce) / mass_total;
+    // J * alpha = -m * a_x * h - F_drag * h_drag + F_down * e_cp - d_f * F_f + d_r * F_r (13.4)
     let pitch_moment = -mass_total * longitudinal_acceleration * cog_height
+        - aero_loads.drag * aero_points.drag_height
+        + aero_loads.downforce * aero_points.downforce_ahead_of_cog
         - distances.front * axle_forces.front
         + distances.rear * axle_forces.rear;
 
@@ -448,15 +476,17 @@ pub(crate) fn sum_axle_loads(tyre_loads: &CornerLoads) -> AxleLoads {
     }
 }
 
-/// Calculates heave and pitch accelerations from the suspension state and this step's a_x
-/// (docs/11 section 11.8, steps 1, 2 and 5)
+/// Calculates heave and pitch accelerations from the suspension state, this step's a_x and
+/// the aero loads (docs/11 section 11.8, steps 1, 2 and 5, docs/13 section 13.5)
 ///
 /// * `longitudinal_acceleration` - a_x in meters per second squared, m/s^2, positive forward
+/// * `aero_loads` - drag and downforce in Newtons, N, at the speed the step started from
 pub(crate) fn calculate_body_accelerations_from_state(
     car: &Car,
     state: &SuspensionState,
     g_acceleration: f64,
     longitudinal_acceleration: f64,
+    aero_loads: &AeroLoads,
 ) -> BodyAccelerations {
     let distances = calculate_axle_distances(&car.mass, &car.geometry);
     let corner_forces = calculate_corner_forces_from_state(car, state, g_acceleration);
@@ -468,6 +498,8 @@ pub(crate) fn calculate_body_accelerations_from_state(
         &distances,
         longitudinal_acceleration,
         &calculate_axle_forces(&corner_forces),
+        aero_loads,
+        &calculate_aero_points(&car.aero, &distances),
     )
 }
 
@@ -554,13 +586,15 @@ pub(crate) fn calculate_damping_ratios(
 
 #[cfg(test)]
 mod tests {
+    use crate::physics::aero::AeroLoads;
     use crate::physics::car::{Car, ChassisGeometry, Mass};
     use crate::physics::chassis::{
-        AxleDistances, AxleForces, AxleTravel, CornerSuspension, Suspension, SuspensionState,
-        calculate_axle_distances, calculate_axle_forces, calculate_axle_travel,
-        calculate_body_accelerations, calculate_body_accelerations_from_state,
-        calculate_corner_force, calculate_corner_forces_from_state, calculate_damping_ratios,
-        calculate_end_stop_force, calculate_front_compression, calculate_front_compression_speed,
+        AeroPoints, AxleDistances, AxleForces, AxleTravel, CornerSuspension, Suspension,
+        SuspensionState, calculate_aero_points, calculate_axle_distances, calculate_axle_forces,
+        calculate_axle_travel, calculate_body_accelerations,
+        calculate_body_accelerations_from_state, calculate_corner_force,
+        calculate_corner_forces_from_state, calculate_damping_ratios, calculate_end_stop_force,
+        calculate_front_compression, calculate_front_compression_speed,
         calculate_natural_frequencies, calculate_rear_compression,
         calculate_rear_compression_speed, calculate_ride_heights, calculate_static_corner_loads,
         calculate_tyre_loads, sum_axle_loads, update_suspension_positions,
@@ -590,6 +624,7 @@ mod tests {
             state,
             G_ACCELERATION,
             longitudinal_acceleration,
+            &AeroLoads::default(),
         );
         let state = update_suspension_velocities(state, &accelerations, time_step);
 
@@ -783,10 +818,165 @@ mod tests {
             rear: -400.0,
         };
 
-        let accelerations =
-            calculate_body_accelerations(1000.0, 500.0, 0.3, &distances, -5.0, &axle_forces);
+        let no_aero_points = AeroPoints {
+            downforce_ahead_of_cog: 0.0,
+            drag_height: 0.0,
+        };
+        let accelerations = calculate_body_accelerations(
+            1000.0,
+            500.0,
+            0.3,
+            &distances,
+            -5.0,
+            &axle_forces,
+            &AeroLoads::default(),
+            &no_aero_points,
+        );
         assert!((accelerations.heave_acceleration + 0.2).abs() < 1e-12);
         assert!((accelerations.pitch_acceleration + 0.12).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_calculate_body_accelerations_with_aero() {
+        // Same car as above, a_x = 0, springs at static (F_f = F_r = 0)
+        // F_down = 3000 N acting e_cp = 0.2 m ahead of the CoG, F_drag = 1000 N at h_drag = 0.5 m
+        // a_z = 3000 / 1000 = 3 m/s^2 (down)
+        // J * alpha = -1000 * 0.5 + 3000 * 0.2 = -500 + 600 = 100 N·m -> alpha = 0.2 rad/s^2 (nose down)
+        let distances = AxleDistances {
+            front: 1.8,
+            rear: 1.2,
+        };
+        let axle_forces = AxleForces {
+            front: 0.0,
+            rear: 0.0,
+        };
+        let aero_loads = AeroLoads {
+            drag: 1000.0,
+            downforce: 3000.0,
+        };
+        let aero_points = AeroPoints {
+            downforce_ahead_of_cog: 0.2,
+            drag_height: 0.5,
+        };
+
+        let accelerations = calculate_body_accelerations(
+            1000.0,
+            500.0,
+            0.3,
+            &distances,
+            0.0,
+            &axle_forces,
+            &aero_loads,
+            &aero_points,
+        );
+        assert!((accelerations.heave_acceleration - 3.0).abs() < 1e-12);
+        assert!((accelerations.pitch_acceleration - 0.2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_calculate_aero_points() {
+        // Default car: d_f = 1.7 m, x_cp = 1.8 m -> e_cp = 1.7 - 1.8 = -0.1 m (0.1 m behind the CoG)
+        let car = Car::default();
+        let distances = calculate_axle_distances(&car.mass, &car.geometry);
+
+        let points = calculate_aero_points(&car.aero, &distances);
+        assert!((points.downforce_ahead_of_cog + 0.1).abs() < 1e-12);
+        assert_eq!(points.drag_height, 0.4);
+    }
+
+    #[test]
+    fn test_aero_steady_state_loads() {
+        // docs/13 section 13.4: at constant speed (a_x = 0) the body settles where the springs
+        // carry the downforce and the drag couple:
+        // extra F_f = (F_down * (W - x_cp) - F_drag * h_drag) / W
+        // extra F_r = (F_down * x_cp + F_drag * h_drag) / W
+        // Default car: W = 3.4 m, x_cp = 1.8 m, h_drag = 0.4 m
+        // F_down = 6000 N, F_drag = 2000 N:
+        // F_f = (6000 * 1.6 - 2000 * 0.4) / 3.4 = (9600 - 800) / 3.4 = 2588.235... N
+        // F_r = (6000 * 1.8 + 2000 * 0.4) / 3.4 = (10 800 + 800) / 3.4 = 3411.764... N
+        let car = Car::default();
+        let aero_loads = AeroLoads {
+            drag: 2000.0,
+            downforce: 6000.0,
+        };
+        let mut state = SuspensionState::default();
+
+        // 10 s: slowest mode decays like exp(-zeta * omega * t), far below the tolerance
+        for _ in 0..10_000 {
+            let accelerations = calculate_body_accelerations_from_state(
+                &car,
+                &state,
+                G_ACCELERATION,
+                0.0,
+                &aero_loads,
+            );
+            state = update_suspension_velocities(&state, &accelerations, TIME_STEP);
+            state = update_suspension_positions(&state, TIME_STEP);
+        }
+
+        let loads = axle_loads(&car, &state);
+        let expected_front = 4000.0 + (6000.0 * 1.6 - 2000.0 * 0.4) / 3.4;
+        let expected_rear = 4000.0 + (6000.0 * 1.8 + 2000.0 * 0.4) / 3.4;
+        assert!((loads.front - expected_front).abs() < 1e-6, "{:?}", loads);
+        assert!((loads.rear - expected_rear).abs() < 1e-6, "{:?}", loads);
+        // Total tyre load = weight + downforce
+        assert!((loads.total() - 14_000.0).abs() < 1e-6);
+
+        // Both compressed (car sits lower), the rear more: the downforce acts behind the CoG
+        // and the drag lifts the nose
+        let distances = calculate_axle_distances(&car.mass, &car.geometry);
+        let travel = calculate_axle_travel(&state, &distances);
+        assert!(travel.front_compression > 0.0);
+        assert!(travel.rear_compression > travel.front_compression);
+        assert!(
+            state.pitch < 0.0,
+            "Expected nose up, got pitch {}",
+            state.pitch
+        );
+    }
+
+    /// Settles the body under constant aero forces at a_x = 0 and returns the axle loads
+    fn settled_aero_loads(car: &Car, aero_loads: &AeroLoads) -> AxleLoads {
+        let mut state = SuspensionState::default();
+        // 10 s: the transient has decayed far below the tolerances used with this helper
+        for _ in 0..10_000 {
+            let accelerations = calculate_body_accelerations_from_state(
+                car,
+                &state,
+                G_ACCELERATION,
+                0.0,
+                aero_loads,
+            );
+            state = update_suspension_velocities(&state, &accelerations, TIME_STEP);
+            state = update_suspension_positions(&state, TIME_STEP);
+        }
+
+        axle_loads(car, &state)
+    }
+
+    #[test]
+    fn test_aero_points_move_load() {
+        // docs/13 section 13.7, test 6, with F_down = 6000 N and F_drag = 2000 N
+        let aero_loads = AeroLoads {
+            drag: 2000.0,
+            downforce: 6000.0,
+        };
+        let baseline = settled_aero_loads(&Car::default(), &aero_loads);
+
+        // Drag point 0.4 m -> 0.8 m: another 2000 * 0.4 / 3.4 = 235.29 N moves to the rear
+        let mut car = Car::default();
+        car.aero.drag_centre_of_pressure_height = 0.8;
+        let higher_drag = settled_aero_loads(&car, &aero_loads);
+        assert!((higher_drag.rear - baseline.rear - 2000.0 * 0.4 / 3.4).abs() < 1e-6);
+        assert!((higher_drag.front - baseline.front + 2000.0 * 0.4 / 3.4).abs() < 1e-6);
+
+        // Centre of pressure 1.8 m -> 1.0 m from the front axle (ahead of the CoG):
+        // 6000 * 0.8 / 3.4 = 1411.76 N moves to the front
+        let mut car = Car::default();
+        car.aero.downforce_centre_of_pressure_from_front_axle = 1.0;
+        let forward_downforce = settled_aero_loads(&car, &aero_loads);
+        assert!((forward_downforce.front - baseline.front - 6000.0 * 0.8 / 3.4).abs() < 1e-6);
+        assert!((forward_downforce.rear - baseline.rear + 6000.0 * 0.8 / 3.4).abs() < 1e-6);
     }
 
     #[test]
@@ -803,6 +993,7 @@ mod tests {
             &state,
             G_ACCELERATION,
             -4.0 * G_ACCELERATION,
+            &AeroLoads::default(),
         );
         assert_eq!(accelerations.heave_acceleration, 0.0);
         assert!((accelerations.pitch_acceleration - 9.6).abs() < 1e-9);
@@ -1260,6 +1451,7 @@ mod tests {
                     &state,
                     G_ACCELERATION,
                     longitudinal_acceleration,
+                    &AeroLoads::default(),
                 );
                 // 1e-9 relative: same arithmetic, only the order of the sums differs
                 assert!(

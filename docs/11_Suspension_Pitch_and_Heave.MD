@@ -282,6 +282,6 @@ It treats the whole car as sprung mass, so the instant load transfer path throug
 ($m_u \cdot a_x \cdot h_u$, about 10% of an F1 car's mass at wheel-centre height) is routed through
 the springs instead. It ignores anti-dive and anti-squat geometry (0% anti: the whole load transfer
 moment goes through the springs), tyre vertical stiffness (in series with the suspension), roll
-(zero in 1D), the height at which aerodynamic drag acts (the full $m \cdot a_x$ is assumed to act at
-ground level), aerodynamic downforce and its dependence on ride height, nonlinear and asymmetric
+(zero in 1D), the dependence of downforce on ride height (docs/13 adds downforce and the drag
+pressure point, with fixed centres of pressure), nonlinear and asymmetric
 (bump/rebound) dampers, and suspension friction. Small angles are assumed throughout.

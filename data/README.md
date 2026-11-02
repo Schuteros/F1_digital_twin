@@ -92,12 +92,15 @@ and the acceleration. Writing one of them (e.g. `revs_hz`) is an unknown key err
 | `wheelbase_m` | m | Distance between the front and rear axle, > 0 |
 | `cog_height_m` | m | Height of the centre of gravity above the ground, >= 0 |
 
-`[aero]` (docs/04)
+`[aero]` (docs/04, docs/13)
 
 | Key | Unit | Meaning |
 |---|---|---|
 | `drag_coefficient` | | Drag coefficient |
-| `frontal_area_m2` | m² | Frontal area |
+| `frontal_area_m2` | m² | Frontal area, reference area for drag and downforce |
+| `downforce_coefficient` | | Downforce coefficient, positive pushes the car down |
+| `downforce_centre_of_pressure_from_front_axle_m` | m | Where the downforce acts, measured back from the front axle |
+| `drag_centre_of_pressure_height_m` | m | Height above the ground where the drag acts |
 
 `[brakes]` (docs/09)
 

@@ -18,10 +18,17 @@ rear_kg = 407.747196738
 wheelbase_m = 3.4
 cog_height_m = 0.3
 
-# Air drag (docs/04). No downforce yet.
+# Air drag (docs/04), downforce and where both act (docs/13).
+# Downforce and pressure point values are placeholders: replace with sourced values.
 [aero]
 drag_coefficient = 0.35
 frontal_area_m2 = 2.0
+downforce_coefficient = 1.0
+# Downforce centre of pressure, measured back from the front axle. Any value is allowed:
+# ahead of the CoG loads the front, behind it loads the rear.
+downforce_centre_of_pressure_from_front_axle_m = 1.8
+# Height above the ground where the drag acts
+drag_centre_of_pressure_height_m = 0.4
 
 # Threshold braking with a fixed bias (docs/09).
 # front_bias is the fraction of the brake force on the front axle, 0.0..=1.0.
