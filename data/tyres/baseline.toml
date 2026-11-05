@@ -1,8 +1,17 @@
-# Baseline tyres: the same values as Tyre::default() (docs/03).
+# Baseline tyres: the same values as Tyre::default() (docs/03, docs/14).
 format_version = 1
 
-# Peak static friction, limits traction and braking per axle
-mu_static = 0.9
+# Peak friction at the reference load (docs/14 section 14.2). x = braking and driving,
+# y = cornering. Equal values make the friction ellipse a circle.
+mu_x_ref = 0.9
+mu_y_ref = 0.9
+
+# Tyre load where mu_x_ref and mu_y_ref apply: the static corner load of the baseline car
+reference_load_N = 2000.0
+
+# Fraction by which mu drops when the load rises by reference_load_N. 0 = constant mu,
+# so the baseline run gives the same results as before load sensitivity was added.
+load_sensitivity = 0.0
 
 # Placeholders pending a sourced value. mu_breakaway sits just above mu_rolling:
 # the old 0.7 gave 5600 N of breakaway resistance against 3600 N of traction,

@@ -24,7 +24,7 @@ gives the same results as the code defaults.
 * Every TOML file starts with `format_version = 1`. Any other version is rejected.
 * Every key has its SI unit in its name, written with the unit's real capitalisation:
   `N` newton, `Hz` hertz, `m` meter, `kg` kilogram, `s` second. `_per_` means divided by,
-  `m2` / `m3` mean squared / cubed. Dimensionless values have no unit (`front_bias`, `mu_static`).
+  `m2` / `m3` mean squared / cubed. Dimensionless values have no unit (`front_bias`, `mu_x_ref`).
 * Every key is required unless this page says it is optional. A missing key, an unknown key
   (a typo, or a unit with the wrong capitalisation such as `spring_rate_n_per_m`) is an
   error that names the file and the key.
@@ -151,12 +151,15 @@ calculated from the torque curve, gearing and wheel radius before the simulation
 | `droop_gap_m` | m | Extension from static before the droop limiter engages, >= 0 |
 | `droop_rate_N_per_m` | N/m | Droop stop stiffness, >= 0 |
 
-## Tyre file (`tyres/*.toml`) (docs/03)
+## Tyre file (`tyres/*.toml`) (docs/03, docs/14)
 
 | Key | Unit | Meaning |
 |---|---|---|
 | `format_version` | | Must be `1` |
-| `mu_static` | | Peak friction coefficient, limits traction and braking per axle |
+| `mu_x_ref` | | Longitudinal peak friction coefficient at `reference_load_N`, limits traction and braking, > 0 |
+| `mu_y_ref` | | Lateral (cornering) peak friction coefficient at `reference_load_N`, > 0. Equal to `mu_x_ref` = friction circle |
+| `reference_load_N` | N | Tyre load where `mu_x_ref` and `mu_y_ref` apply, > 0 |
+| `load_sensitivity` | | Fraction by which mu drops when the tyre load rises by `reference_load_N`, >= 0. 0 = constant mu |
 | `mu_rolling` | | Rolling resistance coefficient while moving |
 | `mu_breakaway` | | Resistance coefficient to start moving from standstill |
 | `wheel_radius_m` | m | Wheel radius, > 0 |

@@ -3,8 +3,7 @@
 //! Underlying science equations are found in this documentation:
 //! [Braking Documentation](../../docs/09_Braking.MD)
 
-use crate::physics::loads::AxleLoads;
-use crate::physics::tyres::calculate_split_force_limit;
+use crate::physics::tyres::{AxleGrip, calculate_split_force_limit};
 use serde::Deserialize;
 
 /// Contains the brake system settings
@@ -23,13 +22,9 @@ impl Default for Brakes {
 }
 
 /// Calculates the total braking force in Newtons, N, for threshold braking with a fixed bias:
-/// the brakes are applied until the first axle reaches its traction limit mu * Fz_axle.
-pub(crate) fn calculate_brake_force(
-    axle_loads: &AxleLoads,
-    mu_static: f64,
-    front_bias: f64,
-) -> f64 {
-    calculate_split_force_limit(axle_loads, mu_static, front_bias)
+/// the brakes are applied until the first axle reaches its grip limit (docs/14 section 14.5).
+pub(crate) fn calculate_brake_force(axle_grip: &AxleGrip, front_bias: f64) -> f64 {
+    calculate_split_force_limit(axle_grip, front_bias)
 }
 
 #[cfg(test)]
@@ -38,7 +33,7 @@ mod tests {
     use crate::physics::car::Car;
     use crate::physics::environment::Environment;
     use crate::physics::loads::calculate_static_axle_loads;
-    use crate::physics::tyres::Tyre;
+    use crate::physics::tyres::{Tyre, calculate_axle_grip_from_axle_loads};
 
     #[test]
     fn test_calculate_brake_force() {
@@ -48,7 +43,9 @@ mod tests {
 
         let axle_loads = calculate_static_axle_loads(&car.mass, environment.g_acceleration);
 
-        let brake_force = calculate_brake_force(&axle_loads, tyre.mu_static, car.brakes.front_bias);
+        let axle_grip = calculate_axle_grip_from_axle_loads(&tyre, &axle_loads);
+
+        let brake_force = calculate_brake_force(&axle_grip, car.brakes.front_bias);
 
         // Static axle loads = 407.747196738 kg * 9.81 m/s^2 = 4000 N on each axle
         // Front axle limit = 0.9 * 4000 N = 3600 N -> total = 3600 N / 0.575 = 6260.8696 N

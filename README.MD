@@ -1,6 +1,6 @@
 # F1 Digital Twin Simulator For Design Validation
 
-Physics simulation of a Formula 1 car in progress. In reality, it is not limited to just F1 cars, but any type of car with 4 wheels. Current version 0.7.0.
+Physics simulation of a Formula 1 car in progress. In reality, it is not limited to just F1 cars, but any type of car with 4 wheels. Current version 0.8.0.
 
 ---
 
@@ -8,8 +8,8 @@ Physics simulation of a Formula 1 car in progress. In reality, it is not limited
 
 * **Goal:** We are using Rust programming language code to simulate 2D motion of F1 car.
 * **Current Phase:** We have made a simulation that can simulate 1D motion acceleration with simplified models
-* **Latest Milestone (0.7.0):** Aerodynamic downforce and pressure points (docs/13): downforce acts at a centre of pressure measured from the front axle and drag acts at its own height, both fixed for now. They feed the body heave and pitch equations, so the springs carry them to the four tyre loads and the ride heights
-* **Previous Milestone (0.6.0):** Data files for the car, tyres, track and environment: every parameter now lives in editable TOML / CSV files under `data/` (with SI units in every key name), and a run is started from one run file (section 2)
+* **Latest Milestone (0.8.0):** Tyre load sensitivity and the friction ellipse (docs/14): mu falls linearly with the tyre load, the grip is calculated per tyre from the four corner loads and summed per axle, and the longitudinal grip left over from a lateral force follows the friction ellipse (lateral force is 0 until cornering arrives). The baseline tyre has no load sensitivity, so the baseline results are unchanged
+* **Previous Milestone (0.7.0):** Aerodynamic downforce and pressure points (docs/13): downforce acts at a centre of pressure measured from the front axle and drag acts at its own height, both fixed for now. They feed the body heave and pitch equations, so the springs carry them to the four tyre loads and the ride heights
  
 ---
 
@@ -38,7 +38,7 @@ line, and the program exits with an error.
 ```
 data/
   cars/baseline.toml           mass, geometry, aero, brakes, powertrain (incl. torque curve), suspension
-  tyres/baseline.toml          mu_static, mu_rolling, mu_breakaway, wheel_radius_m
+  tyres/baseline.toml          mu_x_ref, mu_y_ref, reference_load_N, load_sensitivity, mu_rolling, mu_breakaway, wheel_radius_m
   tracks/straight_1000m.csv    braking zones, one per row
   environments/standard.toml   air density, gravity
   runs/baseline.toml           picks the files above + time settings + initial state
@@ -61,7 +61,7 @@ We have set initial conditions and constants. Simulation is made on cycles and i
 Before the first step, `start_simulation` calls `SimulationConfig::prepare()`, which first checks the config with
 `SimulationConfig::validate()` (brake bias and AWD split in 0..=1, wheelbase > 0, CoG height >= 0, time step > 0,
 front + rear mass = total mass, suspension spring rates > 0, damping / gaps / end stop rates >= 0, pitch inertia > 0,
-all suspension values finite, aero downforce coefficient and centre of pressure positions finite, the time step stability limit omega_max * time_step < 2 from docs/11 section 11.8,
+all suspension values finite, aero downforce coefficient and centre of pressure positions finite, tyre `mu_x_ref`, `mu_y_ref` and `reference_load_N` > 0 and `load_sensitivity` >= 0 (docs/14), the time step stability limit omega_max * time_step < 2 from docs/11 section 11.8,
 and for the powertrain (docs/12): a torque curve of at least 2 points with strictly increasing engine speeds and
 finite torques >= 0 that covers `min_revs` to `max_revs`, `min_revs` < `max_revs`, non-empty strictly decreasing
 gear ratios > 0, primary ratio > 0, final drive > 0, `shift_time` >= 0, `downshift_hysteresis` >= 0, wheel radius > 0, the starting
@@ -80,8 +80,8 @@ Every cycle (`simulation_step`) executes in this order:
 
 1. **Track State Update:** Resolve `active_braking_zone` via `find_active_braking_zone()` and evaluate if the car is currently in a braking region using `is_braking_zone()`.
 2. **Powertrain State Update (docs/12 section 12.10):** If no shift is in progress (`shift_time_left` = 0), pick the gear with `select_gear`: upshift when speed >= `upshift_speeds[k]`, downshift when speed < `upshift_speeds[k-1] - downshift_hysteresis` (also while braking), one gear per step. A gear change sets `shift_time_left = shift_time`. Then recalculate the locked engine speed `revs_hz` for the gear (`calculate_engine_revs_from_wheel_speed`, equation 12.2, with the total ratio primary × gear × final drive).
-3. **Loads at the Start of the Step (`calculate_step_loads`, docs/11 section 11.8 steps 1 to 3, docs/13 section 13.5):** From the suspension state in `CarState::suspension` (heave, pitch and their velocities), compute the corner compressions and compression speeds and the corner forces with end stops and the wheel lift clamp (`calculate_corner_forces_from_state`), then the four corner tyre loads (`calculate_corner_tyre_loads`). They are summed into `AxleLoads` (front = FL + FR, rear = RL + RR) with `sum_axle_loads`. Drag and downforce come from the speed at the start of the step (`calculate_aero_loads`). All of these are calculated once and used by both a_x and the body accelerations.
-4. **Net Force Evaluation (`calculate_net_force(car, car_state, axle_loads, aero_loads)`, step 4):** Resistive losses are rolling/breakaway friction (on `AxleLoads::total()`) + air drag.
+3. **Loads at the Start of the Step (`calculate_step_loads`, docs/11 section 11.8 steps 1 to 3, docs/13 section 13.5):** From the suspension state in `CarState::suspension` (heave, pitch and their velocities), compute the corner compressions and compression speeds and the corner forces with end stops and the wheel lift clamp (`calculate_corner_forces_from_state`), then the four corner tyre loads (`calculate_corner_tyre_loads`). They are summed into `AxleLoads` (front = FL + FR, rear = RL + RR) with `sum_axle_loads`. The longitudinal grip of each tyre is calculated from its own load and summed per axle into `AxleGrip` (`calculate_axle_grip`, docs/14 section 14.5). Drag and downforce come from the speed at the start of the step (`calculate_aero_loads`). All of these are calculated once and used by both a_x and the body accelerations.
+4. **Net Force Evaluation (`calculate_net_force(car, car_state, axle_loads, axle_grip, aero_loads)`, step 4):** Resistive losses are rolling/breakaway friction (on `AxleLoads::total()`) + air drag.
     * **If Braking:** If car speed is 0 m/s, net force is 0 N. Otherwise net force equals `-(losses + brake force)`, where brake force is the threshold braking limit for the front brake bias (`calculate_brake_force` → `calculate_split_force_limit`).
     * **If Accelerating:** Calculate powertrain force: 0 while `shift_time_left` > 0, otherwise the full-throttle force in the gear (`calculate_powertrain_force`, docs/12 equation 12.10: clutch slip at peak torque below the clutch lock speed, torque curve through the gearing above it, 0 above the rev limit). Limit it by the tyre grip of the driven axles for the drivetrain's front share (`calculate_split_force_limit`), and subtract losses. At standstill the net force is never negative.
 5. **Acceleration (`get_car_acceleration`):** Divide net force by total mass (`calculate_acceleration`) to get a_x and store it in `CarState::acceleration` (output only, it is not used for load transfer). Then count `shift_time_left` down by the time step (`count_down_shift_time`), so a 5 ms shift at 1 ms steps is exactly 5 steps without drive, including the step that starts it.
@@ -100,7 +100,7 @@ Every cycle (`simulation_step`) executes in this order:
 4. Add anti-dive / anti-squat suspension geometry.
 5. Add roll for 2D (docs file, model and tests; the four-corner suspension data is already in place).
 6. Add tyre vertical stiffness (in series with the suspension).
-7. Add tyre load sensitivity, and downforce that depends on ride height and pitch (docs/13 section 13.8).
+7. Add downforce that depends on ride height and pitch (docs/13 section 13.8). Replace the placeholder tyre grip values with measured tyre data (docs/14 section 14.6).
 8. Add rotating inertia / effective mass (docs/12 section 12.11).
 9. Add drivetrain efficiency.
 10. Add a part throttle map (torque over engine speed and throttle).

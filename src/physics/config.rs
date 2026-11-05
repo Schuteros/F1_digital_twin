@@ -405,7 +405,7 @@ mod tests {
         let data = TempData::new("tyre_override");
         data.write(
             "tyres/grippy.toml",
-            "format_version = 1\nmu_static = 1.2\nmu_rolling = 0.03\nmu_breakaway = 0.035\nwheel_radius_m = 0.33\n",
+            "format_version = 1\nmu_x_ref = 1.2\nmu_y_ref = 1.1\nreference_load_N = 700.0\nload_sensitivity = 0.2\nmu_rolling = 0.03\nmu_breakaway = 0.035\nwheel_radius_m = 0.33\n",
         );
 
         // The run file's tyres win over the car's default_tyres
@@ -415,7 +415,10 @@ mod tests {
             "tyres = \"../tyres/grippy.toml\"",
         );
         let tyre = load_run(&data.run()).unwrap().car.tyre;
-        assert_eq!(tyre.mu_static, 1.2);
+        assert_eq!(tyre.mu_x_ref, 1.2);
+        assert_eq!(tyre.mu_y_ref, 1.1);
+        assert_eq!(tyre.reference_load, 700.0);
+        assert_eq!(tyre.load_sensitivity, 0.2);
         assert_eq!(tyre.wheel_radius, 0.33);
 
         // Without tyres in the run file, the car's default_tyres is used
@@ -526,7 +529,7 @@ mod tests {
 
         // Unknown key in a flat file and in the run file
         let data = TempData::new("unknown_key_flat");
-        data.replace("tyres/baseline.toml", "mu_static", "mu_peak");
+        data.replace("tyres/baseline.toml", "mu_x_ref", "mu_peak");
         let message = load_run(&data.run()).unwrap_err();
         assert!(message.contains("unknown field `mu_peak`"), "{}", message);
         assert!(message.contains("../tyres/baseline.toml"), "{}", message);

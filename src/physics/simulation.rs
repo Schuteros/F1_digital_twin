@@ -18,6 +18,7 @@ use crate::physics::suspension::{
     update_suspension_positions, update_suspension_velocities,
 };
 use crate::physics::track::{Track, find_active_braking_zone, is_braking_zone};
+use crate::physics::tyres::{AxleGrip, Tyre, calculate_axle_grip};
 
 /// Allowed difference between mass.front + mass.rear and mass.total in kilograms, kg
 const MASS_SUM_TOLERANCE: f64 = 1e-6;
@@ -101,6 +102,8 @@ pub(crate) struct StepLoads {
     pub corner_forces: CornerForces,
     /// Axle normal loads (sum of the corner tyre loads) in Newtons, N
     pub axle_loads: AxleLoads,
+    /// Longitudinal grip limit of each axle from the corner tyre loads in Newtons, N (docs/14)
+    pub axle_grip: AxleGrip,
     /// Drag and downforce at the speed the step starts from in Newtons, N
     pub aero_loads: AeroLoads,
 }
@@ -308,6 +311,7 @@ pub(crate) fn calculate_step_loads(
     StepLoads {
         corner_forces,
         axle_loads: sum_axle_loads(&tyre_loads),
+        axle_grip: calculate_axle_grip(&simulation_config.car.tyre, &tyre_loads),
         aero_loads: calculate_aero_loads(
             &simulation_config.car.aero,
             simulation_config.environment.air_density,
@@ -330,6 +334,7 @@ pub(crate) fn get_car_acceleration(
         car,
         car_state,
         &step_loads.axle_loads,
+        &step_loads.axle_grip,
         &step_loads.aero_loads,
     );
 
@@ -402,6 +407,8 @@ impl SimulationConfig {
                 wheel_radius
             ));
         }
+
+        validate_tyre(&self.car.tyre)?;
 
         let top_gear = self.car.powertrain.gear_ratios.len();
         let initial_gear = self.initial_car_state.gear as usize;
@@ -603,6 +610,29 @@ fn calculate_initial_car_state(simulation_config: &SimulationConfig) -> CarState
 }
 
 /// Checks one suspension corner. `name` is the corner's field name, used in the error message.
+/// Checks the grip values of the tyre (docs/14)
+fn validate_tyre(tyre: &Tyre) -> Result<(), String> {
+    for (field, mu) in [("mu_x_ref", tyre.mu_x_ref), ("mu_y_ref", tyre.mu_y_ref)] {
+        if !mu.is_finite() || mu <= 0.0 {
+            return Err(format!("tyre.{} must be > 0, got {}", field, mu));
+        }
+    }
+    // mu is divided by the reference load (docs/14, equation 14.1)
+    if !tyre.reference_load.is_finite() || tyre.reference_load <= 0.0 {
+        return Err(format!(
+            "tyre.reference_load must be > 0 N, got {}",
+            tyre.reference_load
+        ));
+    }
+    if !tyre.load_sensitivity.is_finite() || tyre.load_sensitivity < 0.0 {
+        return Err(format!(
+            "tyre.load_sensitivity must be >= 0, got {}",
+            tyre.load_sensitivity
+        ));
+    }
+    Ok(())
+}
+
 fn validate_corner_suspension(name: &str, corner: &CornerSuspension) -> Result<(), String> {
     if !corner.spring_rate.is_finite() || corner.spring_rate <= 0.0 {
         return Err(format!(
@@ -783,7 +813,9 @@ mod tests {
     use crate::physics::states::CarState;
     use crate::physics::suspension::{SuspensionState, calculate_tyre_loads, sum_axle_loads};
     use crate::physics::track::Track;
-    use crate::physics::tyres::{calculate_current_tyre_friction, calculate_split_force_limit};
+    use crate::physics::tyres::{
+        calculate_axle_grip, calculate_current_tyre_friction, calculate_split_force_limit,
+    };
 
     /// Largest rounding error in Newtons, N, when a step's powertrain force is recovered from
     /// a_x * m + losses: dividing by the mass and multiplying back on forces up to ~2e4 N rounds
@@ -838,15 +870,14 @@ mod tests {
     /// Tyre grip limit of the driven axles in Newtons, N, at the state a step started from
     fn grip_limit(simulation_config: &SimulationConfig, before: &CarState) -> f64 {
         let car = &simulation_config.car;
-        let axle_loads = sum_axle_loads(&calculate_tyre_loads(
+        let tyre_loads = calculate_tyre_loads(
             car,
             &before.suspension,
             simulation_config.environment.g_acceleration,
-        ));
+        );
 
         calculate_split_force_limit(
-            &axle_loads,
-            car.tyre.mu_static,
+            &calculate_axle_grip(&car.tyre, &tyre_loads),
             car.powertrain.drivetrain.front_share(),
         )
     }
@@ -1573,6 +1604,16 @@ mod tests {
             // Wheel radius and starting gear (the shift tables need both)
             ("wheel_radius = 0", |c| c.car.tyre.wheel_radius = 0.0),
             ("wheel_radius NaN", |c| c.car.tyre.wheel_radius = f64::NAN),
+            ("mu_x_ref = 0", |c| c.car.tyre.mu_x_ref = 0.0),
+            ("mu_y_ref < 0", |c| c.car.tyre.mu_y_ref = -0.1),
+            ("mu_x_ref NaN", |c| c.car.tyre.mu_x_ref = f64::NAN),
+            ("reference_load = 0", |c| c.car.tyre.reference_load = 0.0),
+            ("load_sensitivity < 0", |c| {
+                c.car.tyre.load_sensitivity = -0.1
+            }),
+            ("load_sensitivity infinite", |c| {
+                c.car.tyre.load_sensitivity = f64::INFINITY
+            }),
             ("initial gear 0", |c| c.initial_car_state.gear = 0),
             ("initial gear above top gear", |c| {
                 c.initial_car_state.gear = 9

@@ -4,17 +4,21 @@ use crate::physics::car::Car;
 use crate::physics::loads::AxleLoads;
 use crate::physics::powertrain::{Powertrain, calculate_powertrain_force};
 use crate::physics::states::CarState;
-use crate::physics::tyres::{Tyre, calculate_current_tyre_friction, calculate_split_force_limit};
+use crate::physics::tyres::{
+    AxleGrip, Tyre, calculate_current_tyre_friction, calculate_split_force_limit,
+};
 
 /// Calculates the net longitudinal force on the car in Newtons, N, positive forward.
 ///
 /// `axle_loads` are the axle normal forces for this step; in the simulation they are the
-/// corner tyre loads from the suspension state (docs/11 section 11.8). `aero_loads` are the
-/// drag and downforce at the speed the step starts from.
-pub fn calculate_net_force(
+/// corner tyre loads from the suspension state (docs/11 section 11.8). `axle_grip` is the
+/// longitudinal grip limit of each axle from those tyre loads (docs/14 section 14.5).
+/// `aero_loads` are the drag and downforce at the speed the step starts from.
+pub(crate) fn calculate_net_force(
     car: &Car,
     car_state: &CarState,
     axle_loads: &AxleLoads,
+    axle_grip: &AxleGrip,
     aero_loads: &AeroLoads,
 ) -> f64 {
     let force_losses = calculate_force_losses(car, car_state, axle_loads, aero_loads);
@@ -23,14 +27,13 @@ pub fn calculate_net_force(
         if car_state.speed == 0.0 {
             0.0
         } else {
-            let brake_force =
-                calculate_brake_force(axle_loads, car.tyre.mu_static, car.brakes.front_bias);
+            let brake_force = calculate_brake_force(axle_grip, car.brakes.front_bias);
 
             -(force_losses + brake_force)
         }
     } else {
         let powertrain_force = calculate_powertrain_force_tyre_traction_limited(
-            axle_loads,
+            axle_grip,
             car_state,
             &car.powertrain,
             &car.tyre,
@@ -73,7 +76,7 @@ fn calculate_force_losses(
 /// The powertrain force is the full-throttle force in the current gear (docs/12, equation 12.10),
 /// or 0 while a gear shift is in progress (docs/12 section 12.8).
 fn calculate_powertrain_force_tyre_traction_limited(
-    axle_loads: &AxleLoads,
+    axle_grip: &AxleGrip,
     car_state: &CarState,
     powertrain: &Powertrain,
     tyre: &Tyre,
@@ -88,11 +91,8 @@ fn calculate_powertrain_force_tyre_traction_limited(
             car_state.speed,
         )
     };
-    let traction_force = calculate_split_force_limit(
-        axle_loads,
-        tyre.mu_static,
-        powertrain.drivetrain.front_share(),
-    );
+    let traction_force =
+        calculate_split_force_limit(axle_grip, powertrain.drivetrain.front_share());
 
     powertrain_force.min(traction_force)
 }
@@ -116,7 +116,7 @@ mod tests {
     use crate::physics::powertrain::{Drivetrain, Powertrain};
     use crate::physics::simulation::SimulationConfig;
     use crate::physics::states::CarState;
-    use crate::physics::tyres::Tyre;
+    use crate::physics::tyres::{AxleGrip, Tyre, calculate_axle_grip_from_axle_loads};
 
     /// Default car without load transfer: 407.747196738 kg * 9.81 m/s^2 = 4000 N per axle
     fn default_static_axle_loads() -> AxleLoads {
@@ -124,6 +124,11 @@ mod tests {
             front: 4000.0, // Newtons (N)
             rear: 4000.0,  // Newtons (N)
         }
+    }
+
+    /// Grip of the default tyre on the default static axle loads: 0.9 * 4000 N = 3600 N per axle
+    fn default_static_axle_grip() -> AxleGrip {
+        calculate_axle_grip_from_axle_loads(&Tyre::default(), &default_static_axle_loads())
     }
 
     /// Drag and downforce at the starting speed of the config
@@ -164,7 +169,7 @@ mod tests {
 
         let powertrain_force_tyre_traction_limited =
             calculate_powertrain_force_tyre_traction_limited(
-                &axle_loads,
+                &calculate_axle_grip_from_axle_loads(&tyre, &axle_loads),
                 &car_state,
                 &powertrain,
                 &tyre,
@@ -190,7 +195,7 @@ mod tests {
         };
 
         let force = calculate_powertrain_force_tyre_traction_limited(
-            &default_static_axle_loads(),
+            &default_static_axle_grip(),
             &car_state,
             &prepared_powertrain(),
             &Tyre::default(),
@@ -222,7 +227,7 @@ mod tests {
 
         // RWD: 0.9 * 3000 N = 2700 N
         let force = calculate_powertrain_force_tyre_traction_limited(
-            &axle_loads,
+            &calculate_axle_grip_from_axle_loads(&tyre, &axle_loads),
             &car_state,
             &powertrain,
             &tyre,
@@ -232,7 +237,7 @@ mod tests {
         // FWD: 0.9 * 5000 N = 4500 N
         powertrain.drivetrain = Drivetrain::FrontWheelDrive;
         let force = calculate_powertrain_force_tyre_traction_limited(
-            &axle_loads,
+            &calculate_axle_grip_from_axle_loads(&tyre, &axle_loads),
             &car_state,
             &powertrain,
             &tyre,
@@ -244,7 +249,7 @@ mod tests {
             front_torque_split: 0.6,
         };
         let force = calculate_powertrain_force_tyre_traction_limited(
-            &axle_loads,
+            &calculate_axle_grip_from_axle_loads(&tyre, &axle_loads),
             &car_state,
             &powertrain,
             &tyre,
@@ -296,6 +301,7 @@ mod tests {
             &simulation_config.car,
             &simulation_config.initial_car_state,
             &default_static_axle_loads(),
+            &default_static_axle_grip(),
             &aero_loads(&simulation_config),
         );
 
@@ -330,6 +336,7 @@ mod tests {
             &simulation_config.car,
             &simulation_config.initial_car_state,
             &default_static_axle_loads(),
+            &default_static_axle_grip(),
             &aero_loads(&simulation_config),
         );
 
@@ -348,6 +355,7 @@ mod tests {
             &simulation_config.car,
             &simulation_config.initial_car_state,
             &default_static_axle_loads(),
+            &default_static_axle_grip(),
             &aero_loads(&simulation_config),
         );
 
@@ -365,6 +373,7 @@ mod tests {
             &simulation_config.car,
             &simulation_config.initial_car_state,
             &default_static_axle_loads(),
+            &default_static_axle_grip(),
             &aero_loads(&simulation_config),
         );
 
@@ -391,6 +400,7 @@ mod tests {
             &simulation_config.car,
             &simulation_config.initial_car_state,
             &default_static_axle_loads(),
+            &default_static_axle_grip(),
             &aero_loads(&simulation_config),
         );
 
@@ -417,6 +427,7 @@ mod tests {
             &simulation_config.car,
             &simulation_config.initial_car_state,
             &default_static_axle_loads(),
+            &default_static_axle_grip(),
             &aero_loads(&simulation_config),
         );
 
