@@ -22,6 +22,15 @@ settings and the starting state of the car:
 cargo run --release -- data/runs/baseline.toml
 ```
 
+To write the car state to a CSV file while it runs, add `--log <file>`, and optionally `--log-every <steps>`
+to write only every Nth step (the first and last steps are always written). The columns are time, distance, speed,
+acceleration, gear, revs, braking flag, shift time left, braking zone index, heave, heave velocity, pitch and pitch
+rate, in SI units named in the header:
+
+```
+cargo run --release -- data/runs/baseline.toml --log baseline.csv --log-every 10
+```
+
 Without a run file the program prints a usage line and exits with an error. A bad data file (missing or unknown key,
 wrong `format_version`, bad CSV row, or a value `validate()` rejects) is reported with the file path and the key or
 line, and the program exits with an error.
@@ -55,11 +64,13 @@ front + rear mass = total mass, suspension spring rates > 0, damping / gaps / en
 all suspension values finite, aero downforce coefficient and centre of pressure positions finite, the time step stability limit omega_max * time_step < 2 from docs/11 section 11.8,
 and for the powertrain (docs/12): a torque curve of at least 2 points with strictly increasing engine speeds and
 finite torques >= 0 that covers `min_revs` to `max_revs`, `min_revs` < `max_revs`, non-empty strictly decreasing
-gear ratios > 0, final drive > 0, `shift_time` >= 0, `downshift_hysteresis` >= 0, wheel radius > 0, the starting
+gear ratios > 0, primary ratio > 0, final drive > 0, `shift_time` >= 0, `downshift_hysteresis` >= 0, wheel radius > 0, the starting
 gear within the gearbox, all values finite, braking zones finite with end >= start, and the starting state: speed >= 0,
 shift time left >= 0, distance and suspension state finite) and panics with the reason if it is invalid.
-It then computes the two powertrain tables once from the torque curve, gear ratios and wheel radius:
-`clutch_lock_speeds` (docs/12 equation 12.8) and `upshift_speeds` (docs/12 section 12.6, scan in 0.01 m/s steps).
+It then computes everything that stays the same for the whole run, so the steps don't recalculate it:
+`static_values` (`calculate_static_car_values`: CoG to axle distances, static corner loads, where the aero forces act)
+and, with `fill_powertrain_tables`, the peak torque, `clutch_lock_speeds` (docs/12 equation 12.8) and
+`upshift_speeds` (docs/12 section 12.6, scan in 0.01 m/s steps).
 Last, it calculates the part of the starting car state that follows from the starting conditions and the config
 (`calculate_initial_car_state`): active braking zone, braking flag, locked engine speed `revs_hz` and acceleration.
 The first step recalculates them the same way, so they don't change the results. `load_run` calls `prepare()` when the
@@ -68,13 +79,13 @@ data files are loaded, so a bad file is reported before the simulation starts an
 Every cycle (`simulation_step`) executes in this order:
 
 1. **Track State Update:** Resolve `active_braking_zone` via `find_active_braking_zone()` and evaluate if the car is currently in a braking region using `is_braking_zone()`.
-2. **Powertrain State Update (docs/12 section 12.10):** If no shift is in progress (`shift_time_left` = 0), pick the gear with `select_gear`: upshift when speed >= `upshift_speeds[k]`, downshift only when not braking and speed < `upshift_speeds[k-1] - downshift_hysteresis`, one gear per step. A gear change sets `shift_time_left = shift_time`. Then recalculate the locked transmission input speed `revs_hz` for the gear (`calculate_transmission_input_revs`, equation 12.2).
-3. **Tyre Loads (`get_car_acceleration`, docs/11 section 11.8 steps 1 to 3):** From the suspension state in `CarState::suspension` (heave, pitch and their velocities), compute the corner compressions and compression speeds, the corner forces with end stops and the wheel lift clamp, and the four corner tyre loads (`calculate_tyre_loads`). They are summed into `AxleLoads` (front = FL + FR, rear = RL + RR) with `sum_axle_loads`.
-4. **Net Force Evaluation (`calculate_net_force(car, environment, car_state, axle_loads)`, step 4):** Resistive losses are rolling/breakaway friction (on `AxleLoads::total()`) + air drag.
+2. **Powertrain State Update (docs/12 section 12.10):** If no shift is in progress (`shift_time_left` = 0), pick the gear with `select_gear`: upshift when speed >= `upshift_speeds[k]`, downshift when speed < `upshift_speeds[k-1] - downshift_hysteresis` (also while braking), one gear per step. A gear change sets `shift_time_left = shift_time`. Then recalculate the locked engine speed `revs_hz` for the gear (`calculate_engine_revs_from_wheel_speed`, equation 12.2, with the total ratio primary × gear × final drive).
+3. **Loads at the Start of the Step (`calculate_step_loads`, docs/11 section 11.8 steps 1 to 3, docs/13 section 13.5):** From the suspension state in `CarState::suspension` (heave, pitch and their velocities), compute the corner compressions and compression speeds and the corner forces with end stops and the wheel lift clamp (`calculate_corner_forces_from_state`), then the four corner tyre loads (`calculate_corner_tyre_loads`). They are summed into `AxleLoads` (front = FL + FR, rear = RL + RR) with `sum_axle_loads`. Drag and downforce come from the speed at the start of the step (`calculate_aero_loads`). All of these are calculated once and used by both a_x and the body accelerations.
+4. **Net Force Evaluation (`calculate_net_force(car, car_state, axle_loads, aero_loads)`, step 4):** Resistive losses are rolling/breakaway friction (on `AxleLoads::total()`) + air drag.
     * **If Braking:** If car speed is 0 m/s, net force is 0 N. Otherwise net force equals `-(losses + brake force)`, where brake force is the threshold braking limit for the front brake bias (`calculate_brake_force` → `calculate_split_force_limit`).
-    * **If Accelerating:** Calculate powertrain force: 0 while `shift_time_left` > 0, otherwise the best force in the gear (`calculate_best_force`, docs/12 equation 12.10: clutch slip at peak torque below the clutch lock speed, torque curve through the gearing above it, 0 above the rev limit). Limit it by the tyre grip of the driven axles for the drivetrain's front share (`calculate_split_force_limit`), and subtract losses. At standstill the net force is never negative.
-5. **Acceleration:** Divide net force by total mass (`calculate_acceleration`) to get a_x and store it in `CarState::acceleration` (output only, it is not used for load transfer). Then count `shift_time_left` down by the time step (`count_down_shift_time`), so a 5 ms shift at 1 ms steps is exactly 5 steps without drive, including the step that starts it.
-6. **Body Accelerations (step 5):** Drag and downforce from the speed at the start of the step (`calculate_aero_loads`, docs/13 section 13.5), then heave and pitch accelerations from the same suspension state, this step's a_x and the aero forces (`calculate_body_accelerations_from_state`, docs/13 equations 13.2 and 13.3).
+    * **If Accelerating:** Calculate powertrain force: 0 while `shift_time_left` > 0, otherwise the full-throttle force in the gear (`calculate_powertrain_force`, docs/12 equation 12.10: clutch slip at peak torque below the clutch lock speed, torque curve through the gearing above it, 0 above the rev limit). Limit it by the tyre grip of the driven axles for the drivetrain's front share (`calculate_split_force_limit`), and subtract losses. At standstill the net force is never negative.
+5. **Acceleration (`get_car_acceleration`):** Divide net force by total mass (`calculate_acceleration`) to get a_x and store it in `CarState::acceleration` (output only, it is not used for load transfer). Then count `shift_time_left` down by the time step (`count_down_shift_time`), so a 5 ms shift at 1 ms steps is exactly 5 steps without drive, including the step that starts it.
+6. **Body Accelerations (step 5):** Heave and pitch accelerations from the same corner forces, this step's a_x and the aero forces (`calculate_body_accelerations`, docs/13 equations 13.2 and 13.3).
 7. **Velocity Updates (step 6):** Speed (`get_car_speed`), heave velocity and pitch rate (`update_suspension_velocities`), each by acceleration × time step. If the car drops to or below 0 m/s while braking, clamp speed to 0.0 m/s and acceleration to 0.0 m/s². From then on a_x is 0 and the suspension keeps integrating, so the body settles back to static.
 8. **Position Updates (step 7):** Distance (`get_car_distance`), heave and pitch (`update_suspension_positions`), each by the **new** velocity × time step (semi-implicit Euler).
 9. **Time Step Advancement:** Increment total simulation runtime by `time_step`.

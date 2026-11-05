@@ -13,19 +13,6 @@ impl Default for Track {
     }
 }
 
-/// Function checks if there are braking zones or not
-pub(crate) fn is_braking_zone(
-    braking_zones: &[(f64, f64)],
-    position: f64,
-    active_zone: usize,
-) -> bool {
-    if let Some(&(start, end)) = braking_zones.get(active_zone) {
-        position >= start && position <= end
-    } else {
-        false
-    }
-}
-
 /// Function checks in which active braking zone are we
 pub(crate) fn find_active_braking_zone(
     distance: f64,
@@ -41,6 +28,19 @@ pub(crate) fn find_active_braking_zone(
         }
     }
     active_braking_zone
+}
+
+/// Function checks if there are braking zones or not
+pub(crate) fn is_braking_zone(
+    braking_zones: &[(f64, f64)],
+    position: f64,
+    active_zone: usize,
+) -> bool {
+    if let Some(&(start, end)) = braking_zones.get(active_zone) {
+        position >= start && position <= end
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]

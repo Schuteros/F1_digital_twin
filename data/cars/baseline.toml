@@ -51,6 +51,8 @@ torque_curve_Hz_and_N_m = [
 ]
 max_revs_Hz = 216.67
 min_revs_Hz = 66.67
+# Engine to gearbox input. 1.0 = the engine drives the gearbox directly
+primary_ratio = 1.0
 # 1st gear first, strictly decreasing
 gear_ratios = [5.43, 4.02, 3.29, 2.78, 2.41, 2.13, 1.87, 1.65]
 final_drive = 3.0

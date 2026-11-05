@@ -55,7 +55,7 @@ the weight.
 
 The full vertical force balance on the body is:
 
-$$m \cdot a_z = m \cdot g - \left( F_{\text{static}} + F_f + F_r \right) \tag{11.1.}$$
+$$m \cdot a_z = m \cdot g - \left( F_{\text{static}} + dF_f + dF_r \right) \tag{11.1.}$$
 
 At static the springs carry exactly the weight, $F_{\text{static}} = m \cdot g$, so those two
 terms cancel. For a linear spring this is exact, not an approximation:
@@ -152,7 +152,7 @@ $F_{z,\text{static},FL} = F_{z,\text{static},FR} = m_{\text{front}} \cdot g / 2$
 
 The axle forces are the sums of their corners:
 
-$$F_f = F_{FL} + F_{FR}, \qquad F_r = F_{RL} + F_{RR} \tag{11.11.}$$
+$$dF_f = F_{FL} + F_{FR}, \qquad dF_r = F_{RL} + F_{RR} \tag{11.11.}$$
 
 ---
 
@@ -161,7 +161,7 @@ $$F_f = F_{FL} + F_{FR}, \qquad F_r = F_{RL} + F_{RR} \tag{11.11.}$$
 **Heave.** Newton's second law, using only the extra forces (section 11.2). The suspension pushes
 the body up and $z$ is measured down, hence the minus sign:
 
-$$m \cdot a_z = -\left( F_f + F_r \right) \tag{11.12.}$$
+$$m \cdot a_z = -\left( dF_f + dF_r \right) \tag{11.12.}$$
 
 **Pitch.** This is Newton's second law for rotation: moment of inertia times angular acceleration
 equals the sum of moments about the CoG. A moment is a force times its perpendicular distance from
@@ -172,10 +172,10 @@ The moments about the CoG, positive nose down:
 * **Load transfer moment** $-m \cdot a_x \cdot h$. The longitudinal tyre forces act at ground level,
   a distance $h$ below the CoG, and their sum is $m \cdot a_x$. Under braking ($a_x < 0$) this term is
   positive and pitches the nose down. This is the same couple as in docs/10, section 10.4.
-* **Front suspension** $-d_f \cdot F_f$. It pushes up ahead of the CoG, which lifts the nose.
-* **Rear suspension** $+d_r \cdot F_r$. It pushes up behind the CoG, which pushes the nose down.
+* **Front suspension** $-d_f \cdot dF_f$. It pushes up ahead of the CoG, which lifts the nose.
+* **Rear suspension** $+d_r \cdot dF_r$. It pushes up behind the CoG, which pushes the nose down.
 
-$$J \cdot \alpha = -m \cdot a_x \cdot h \; - \; d_f \cdot F_f \; + \; d_r \cdot F_r \tag{11.13.}$$
+$$J \cdot \alpha = -m \cdot a_x \cdot h \; - \; d_f \cdot dF_f \; + \; d_r \cdot dF_r \tag{11.13.}$$
 
 The static loads do not appear: at static they balance each other's moments about the CoG,
 for the same reason as in section 11.2.
@@ -185,9 +185,9 @@ for the same reason as in section 11.2.
 ## 11.6. Steady State: Recovering Docs/10
 
 Under constant $a_x$, once the motion has settled, $a_z = 0$ and $\alpha = 0$. Equation 11.12 gives
-$F_r = -F_f$. Substituting into equation 11.13:
+$dF_r = -dF_f$. Substituting into equation 11.13:
 
-$$0 = -m \cdot a_x \cdot h - d_f \cdot F_f - d_r \cdot F_f \quad \Rightarrow \quad F_f = -\frac{m \cdot a_x \cdot h}{W} \tag{11.14.}$$
+$$0 = -m \cdot a_x \cdot h - d_f \cdot dF_f - d_r \cdot dF_f \quad \Rightarrow \quad dF_f = -\frac{m \cdot a_x \cdot h}{W} \tag{11.14.}$$
 
 This is exactly the load transfer term of docs/10 (equation 10.5), and the total load stays $m \cdot g$.
 Spring rates, damping and $J$ do not appear. They decide the settled pitch angle and the path to the
@@ -195,7 +195,7 @@ steady state, not the steady-state load. This is the first test of any implement
 
 The settled compressions and pitch angle (linear springs, no stops touched) are:
 
-$$s_f = \frac{F_f}{k_f}, \qquad s_r = \frac{F_r}{k_r}, \qquad \theta_{ss} = \frac{s_f - s_r}{W} \tag{11.15.}$$
+$$s_f = \frac{dF_f}{k_f}, \qquad s_r = \frac{dF_r}{k_r}, \qquad \theta_{ss} = \frac{s_f - s_r}{W} \tag{11.15.}$$
 
 where $k_f$ and $k_r$ are now the **axle** rates (two corners each).
 

@@ -50,28 +50,6 @@ pub(crate) struct AeroLoads {
     pub downforce: f64,
 }
 
-/// Calculates air drag
-pub(crate) fn calculate_air_drag(
-    air_density: f64,
-    drag_coefficient: f64,
-    frontal_area: f64,
-    speed: f64,
-) -> f64 {
-    0.5 * air_density * drag_coefficient * frontal_area * speed * speed.abs() // Newtons (N)
-}
-
-/// Calculates downforce in Newtons, N: F_down = 0.5 * rho * C_down * A * v^2 (docs/13, equation 13.1).
-///
-/// Uses v^2 without a sign: the air pushes the car down whichever way it moves.
-pub(crate) fn calculate_downforce(
-    air_density: f64,
-    downforce_coefficient: f64,
-    frontal_area: f64,
-    speed: f64,
-) -> f64 {
-    0.5 * air_density * downforce_coefficient * frontal_area * speed * speed
-}
-
 /// Calculates drag and downforce at `speed` in meters per second, m/s
 pub(crate) fn calculate_aero_loads(aero: &Aero, air_density: f64, speed: f64) -> AeroLoads {
     AeroLoads {
@@ -83,6 +61,28 @@ pub(crate) fn calculate_aero_loads(aero: &Aero, air_density: f64, speed: f64) ->
             speed,
         ),
     }
+}
+
+/// Calculates air drag
+pub(crate) fn calculate_air_drag(
+    air_density: f64,
+    drag_coefficient: f64,
+    frontal_area: f64,
+    speed: f64,
+) -> f64 {
+    0.5 * air_density * drag_coefficient * frontal_area * speed * speed.abs() // Newtons (N)
+}
+
+/// Calculates downforce in Newtons, N: F_downforce = 0.5 * rho * C_down * A * v^2 (docs/13, equation 13.1).
+///
+/// Uses v^2 without a sign: the air pushes the car down whichever way it moves.
+pub(crate) fn calculate_downforce(
+    air_density: f64,
+    downforce_coefficient: f64,
+    frontal_area: f64,
+    speed: f64,
+) -> f64 {
+    0.5 * air_density * downforce_coefficient * frontal_area * speed * speed
 }
 
 #[cfg(test)]

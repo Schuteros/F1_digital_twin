@@ -115,8 +115,9 @@ and the acceleration. Writing one of them (e.g. `revs_hz`) is an unknown key err
 | `torque_curve_Hz_and_N_m` | [Hz, N·m] | Full-throttle torque curve as `[engine speed, torque]` pairs, engine speeds strictly increasing, torques >= 0. Must cover `min_revs_Hz` to `max_revs_Hz` |
 | `max_revs_Hz` | Hz | Rev limit |
 | `min_revs_Hz` | Hz | Lowest engine speed before stalling, < `max_revs_Hz` |
+| `primary_ratio` | | Ratio between the engine and the gearbox input, > 0. `1.0` = engine drives the gearbox directly |
 | `gear_ratios` | | Gear ratios, first gear first, strictly decreasing, > 0 |
-| `final_drive` | | Final drive ratio, > 0 |
+| `final_drive` | | Final drive ratio between the gearbox output and the wheels, > 0 |
 | `shift_time_s` | s | Time without drive during a gear shift, >= 0 |
 | `downshift_hysteresis_m_per_s` | m/s | Downshift happens this far below the upshift speed of the gear below, >= 0 |
 

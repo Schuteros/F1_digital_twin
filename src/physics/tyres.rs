@@ -35,24 +35,6 @@ impl Default for Tyre {
     }
 }
 
-/// Calculates rolling friction force from tyres knowing tyre model
-pub(crate) fn calculate_force_tyre_friction_rolling(
-    total_normal_force: f64,
-    mu_rolling: f64,
-) -> f64 {
-    total_normal_force * mu_rolling
-}
-
-/// Calculates breakaway friction force from tyres knowing tyre model
-fn calculate_force_tyre_friction_breakaway(total_normal_force: f64, mu_breakaway: f64) -> f64 {
-    total_normal_force * mu_breakaway
-}
-
-/// Calculates tyre static friction which correlates to accessible traction limit
-pub(crate) fn calculate_force_static_friction(axle_normal_force: f64, mu_static: f64) -> f64 {
-    axle_normal_force * mu_static
-}
-
 /// Calculates the largest total longitudinal force in Newtons, N, the tyres can transmit when
 /// it is split front_share : (1 - front_share) between the front and rear axle.
 ///
@@ -92,6 +74,24 @@ pub(crate) fn calculate_current_tyre_friction(
     } else {
         calculate_force_tyre_friction_breakaway(total_normal_force, mu_breakaway)
     }
+}
+
+/// Calculates tyre static friction which correlates to accessible traction limit
+pub(crate) fn calculate_force_static_friction(axle_normal_force: f64, mu_static: f64) -> f64 {
+    axle_normal_force * mu_static
+}
+
+/// Calculates rolling friction force from tyres knowing tyre model
+pub(crate) fn calculate_force_tyre_friction_rolling(
+    total_normal_force: f64,
+    mu_rolling: f64,
+) -> f64 {
+    total_normal_force * mu_rolling
+}
+
+/// Calculates breakaway friction force from tyres knowing tyre model
+fn calculate_force_tyre_friction_breakaway(total_normal_force: f64, mu_breakaway: f64) -> f64 {
+    total_normal_force * mu_breakaway
 }
 
 #[cfg(test)]

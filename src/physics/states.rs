@@ -1,4 +1,4 @@
-use crate::physics::chassis::SuspensionState;
+use crate::physics::suspension::SuspensionState;
 use serde::Deserialize;
 
 /// State of the car at one moment of the simulation.
@@ -16,7 +16,7 @@ pub struct CarState {
     pub distance: f64,
     /// Current gear, 1 is the first gear
     pub gear: u8,
-    /// Transmission input speed if the clutch is locked (n_k) in Hertz, Hz (docs/12, equation 12.2).
+    /// Engine speed if the clutch is locked (n_k) in Hertz, Hz (docs/12, equation 12.2).
     /// Calculated from speed and gear, not in the run file.
     #[serde(skip)]
     pub revs_hz: f64,

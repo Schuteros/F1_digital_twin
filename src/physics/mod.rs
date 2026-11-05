@@ -1,6 +1,7 @@
 mod aero;
 pub mod braking;
 mod car;
+pub mod car_state_log;
 mod chassis;
 pub mod config;
 mod environment;
@@ -10,5 +11,6 @@ mod loads;
 mod powertrain;
 pub(crate) mod simulation;
 mod states;
+mod suspension;
 pub mod track;
 mod tyres;

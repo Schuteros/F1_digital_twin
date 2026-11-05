@@ -37,9 +37,11 @@ Engine:
 * $P(n_e)$ is engine power in Watts (W).
 
 Gearbox and wheel:
+* $i_p$ is the primary ratio between the engine and the gearbox input, dimensionless
+  (1 when the engine drives the gearbox directly),
 * $i_k$ is the gear ratio of gear $k$, dimensionless,
-* $i_f$ is the final drive ratio, dimensionless,
-* $G_k = i_k\, i_f$ is the total ratio from the engine to the wheel in gear $k$, dimensionless,
+* $i_f$ is the final drive ratio between the gearbox output and the wheels, dimensionless,
+* $G_k = i_p\, i_k\, i_f$ is the total ratio from the engine to the wheel in gear $k$, dimensionless,
 * $\rho_k = G_{k+1}/G_k$ is the step between neighbouring gears, dimensionless, always below 1,
 * $r$ is wheel radius in meters (m),
 * $n_k$ is the engine speed that gear $k$ would force with the clutch locked, in Hertz (Hz).
@@ -225,11 +227,12 @@ Clutch lock speeds, from 12.8 with $n_{pk}$ = 8000 rpm: 66.7 km/h in 1st and 90.
 
 ## 12.7. Downshift
 
-Downshifts are only considered **while the car is not braking**. Under braking the gear
-does not matter, because engine braking is not modelled. If the engine speed drops below
+Downshifts are considered **all the time, also while braking**, so the car leaves a braking
+zone in the right gear. Under braking the gear has no effect on the forces yet, because engine
+braking is not modelled, but the car is ready to drive away. If the engine speed drops below
 $n_{min}$, the clutch opens, as it does now.
 
-When not braking, gear $k$ drops to $k-1$ when
+Gear $k$ drops to $k-1$ when
 
 $$v < v_{up,k-1} - \Delta v \tag{12.14.}$$
 
@@ -242,8 +245,9 @@ The table is used on purpose, instead of "downshift when the lower gear lands ju
 limiter". With early upshifts, that limiter rule would downshift straight after every upshift
 and switch gears back and forth.
 
-At the end of a braking zone, the car may be several gears too high. It then
-downshifts one gear at a time, each taking $t_{shift}$, as a sequential gearbox does.
+Under braking the car downshifts one gear at a time, each taking $t_{shift}$, as a sequential
+gearbox does. Braking from top speed takes seconds, while 7 downshifts take 35 ms, so the
+car keeps up with the table.
 
 `shift_up_margin` is no longer needed. `shift_down_margin` becomes $\Delta v$, now in m/s
 instead of Hz.
@@ -297,7 +301,9 @@ as $1/n_e$ on the flat-power part. The low end is reduced for turbo lag.
 **Gearing.** 8 forward gears. One set of ratios is fixed for the whole season, so it is a
 compromise across tracks. The totals below come from typical top-of-gear speeds at
 12,000 rpm (about 100, 135, 165, 195, 225, 255, 290 and 330 km/h) with $r$ = 0.36 m.
-Only $G_k$ matters to the physics, so the split into $i_k$ and $i_f$ = 3.0 is arbitrary.
+Only $G_k$ matters to the physics, so the split into $i_p$ = 1.0, $i_k$ and $i_f$ = 3.0 is
+arbitrary. A car with a primary reduction and a chain or sprocket final drive (for example an
+FS car with $i_p$ = 1.925 and sprockets 42/12, so $i_f$ = 3.5) writes them separately.
 
 | Gear | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
 |---|---|---|---|---|---|---|---|---|
@@ -323,7 +329,7 @@ Before the simulation:
 
 Each step:
 1. If `shift_time_left` > 0: count it down, powertrain force is zero, skip to step 5.
-2. Pick the gear: upshift if $v \ge v_{up,k}$. If not braking, downshift if 12.14 holds.
+2. Pick the gear: upshift if $v \ge v_{up,k}$, downshift if 12.14 holds (also while braking).
    A gear change starts the shift timer (12.8).
 3. Compute $n_k$ for that gear (12.2).
 4. Force from 12.10 (slip below $v_{lock,k}$, locked above).

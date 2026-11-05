@@ -1,83 +1,23 @@
-use crate::physics::aero::calculate_air_drag;
+use crate::physics::aero::AeroLoads;
 use crate::physics::braking::calculate_brake_force;
 use crate::physics::car::Car;
-use crate::physics::environment::Environment;
 use crate::physics::loads::AxleLoads;
-use crate::physics::powertrain::{Powertrain, calculate_best_force};
+use crate::physics::powertrain::{Powertrain, calculate_powertrain_force};
 use crate::physics::states::CarState;
 use crate::physics::tyres::{Tyre, calculate_current_tyre_friction, calculate_split_force_limit};
-
-/// Calculates powertrain force in Newtons, N, limited by the grip of the driven axles.
-/// The powertrain force is split between the axles by the drivetrain, and the first
-/// driven axle to reach its traction limit caps the total (ideal traction control).
-///
-/// The powertrain force is the best force in the current gear (docs/12, equation 12.10),
-/// or 0 while a gear shift is in progress (docs/12 section 12.8).
-fn calculate_powertrain_force_tyre_traction_limited(
-    axle_loads: &AxleLoads,
-    car_state: &CarState,
-    powertrain: &Powertrain,
-    tyre: &Tyre,
-) -> f64 {
-    let powertrain_force = if car_state.shift_time_left > 0.0 {
-        0.0
-    } else {
-        calculate_best_force(
-            powertrain,
-            tyre.wheel_radius,
-            car_state.gear,
-            car_state.speed,
-        )
-    };
-    let traction_force = calculate_split_force_limit(
-        axle_loads,
-        tyre.mu_static,
-        powertrain.drivetrain.front_share(),
-    );
-
-    powertrain_force.min(traction_force)
-}
-
-/// Calculates resistive losses in Newtons, N: rolling (or breakaway) tyre friction and air drag.
-/// Brake force is not included, it is added separately in the braking branch of the net force.
-fn calculate_force_losses(
-    car: &Car,
-    environment: &Environment,
-    car_state: &CarState,
-    axle_loads: &AxleLoads,
-) -> f64 {
-    let friction_loss = calculate_current_tyre_friction(
-        axle_loads.total(),
-        car.tyre.mu_rolling,
-        car.tyre.mu_breakaway,
-        car_state.speed,
-    );
-
-    let air_drag_loss = calculate_air_drag(
-        environment.air_density,
-        car.aero.drag_coefficient,
-        car.aero.frontal_area,
-        car_state.speed,
-    );
-
-    friction_loss + air_drag_loss
-}
-
-pub fn calculate_normal_force(mass: f64, g_acceleration: f64) -> f64 {
-    mass * g_acceleration
-}
 
 /// Calculates the net longitudinal force on the car in Newtons, N, positive forward.
 ///
 /// `axle_loads` are the axle normal forces for this step; in the simulation they are the
-/// corner tyre loads from the suspension state (docs/11 section 11.8).
+/// corner tyre loads from the suspension state (docs/11 section 11.8). `aero_loads` are the
+/// drag and downforce at the speed the step starts from.
 pub fn calculate_net_force(
     car: &Car,
-    environment: &Environment,
     car_state: &CarState,
     axle_loads: &AxleLoads,
+    aero_loads: &AeroLoads,
 ) -> f64 {
-    let force_losses = calculate_force_losses(car, environment, car_state, axle_loads);
+    let force_losses = calculate_force_losses(car, car_state, axle_loads, aero_loads);
 
     if car_state.braking {
         if car_state.speed == 0.0 {
@@ -108,12 +48,66 @@ pub fn calculate_net_force(
     }
 }
 
+/// Calculates resistive losses in Newtons, N: rolling (or breakaway) tyre friction and air drag.
+/// Brake force is not included, it is added separately in the braking branch of the net force.
+fn calculate_force_losses(
+    car: &Car,
+    car_state: &CarState,
+    axle_loads: &AxleLoads,
+    aero_loads: &AeroLoads,
+) -> f64 {
+    let friction_loss = calculate_current_tyre_friction(
+        axle_loads.total(),
+        car.tyre.mu_rolling,
+        car.tyre.mu_breakaway,
+        car_state.speed,
+    );
+
+    friction_loss + aero_loads.drag
+}
+
+/// Calculates powertrain force in Newtons, N, limited by the grip of the driven axles.
+/// The powertrain force is split between the axles by the drivetrain, and the first
+/// driven axle to reach its traction limit caps the total (ideal traction control).
+///
+/// The powertrain force is the full-throttle force in the current gear (docs/12, equation 12.10),
+/// or 0 while a gear shift is in progress (docs/12 section 12.8).
+fn calculate_powertrain_force_tyre_traction_limited(
+    axle_loads: &AxleLoads,
+    car_state: &CarState,
+    powertrain: &Powertrain,
+    tyre: &Tyre,
+) -> f64 {
+    let powertrain_force = if car_state.shift_time_left > 0.0 {
+        0.0
+    } else {
+        calculate_powertrain_force(
+            powertrain,
+            tyre.wheel_radius,
+            car_state.gear,
+            car_state.speed,
+        )
+    };
+    let traction_force = calculate_split_force_limit(
+        axle_loads,
+        tyre.mu_static,
+        powertrain.drivetrain.front_share(),
+    );
+
+    powertrain_force.min(traction_force)
+}
+
 pub(crate) fn calculate_acceleration(force: f64, mass: f64) -> f64 {
     force / mass
 }
 
+pub fn calculate_normal_force(mass: f64, g_acceleration: f64) -> f64 {
+    mass * g_acceleration
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::physics::aero::{AeroLoads, calculate_aero_loads};
     use crate::physics::forces::{
         calculate_acceleration, calculate_force_losses, calculate_net_force,
         calculate_normal_force, calculate_powertrain_force_tyre_traction_limited,
@@ -130,6 +124,15 @@ mod tests {
             front: 4000.0, // Newtons (N)
             rear: 4000.0,  // Newtons (N)
         }
+    }
+
+    /// Drag and downforce at the starting speed of the config
+    fn aero_loads(simulation_config: &SimulationConfig) -> AeroLoads {
+        calculate_aero_loads(
+            &simulation_config.car.aero,
+            simulation_config.environment.air_density,
+            simulation_config.initial_car_state.speed,
+        )
     }
 
     /// Default config with the powertrain shift tables filled (docs/12 section 12.10)
@@ -261,9 +264,9 @@ mod tests {
 
         let force_losses = calculate_force_losses(
             &simulation_config.car,
-            &simulation_config.environment,
-            &simulation_config.initial_car,
+            &simulation_config.initial_car_state,
             &axle_loads,
+            &aero_loads(&simulation_config),
         );
 
         // As the car is moving there is rolling friction = 8000 N * 0.03 = 240 N
@@ -287,13 +290,13 @@ mod tests {
     fn test_calculate_net_force() {
         let mut simulation_config = prepared_config();
 
-        simulation_config.initial_car.gear = 4;
+        simulation_config.initial_car_state.gear = 4;
 
         let net_force = calculate_net_force(
             &simulation_config.car,
-            &simulation_config.environment,
-            &simulation_config.initial_car,
+            &simulation_config.initial_car_state,
             &default_static_axle_loads(),
+            &aero_loads(&simulation_config),
         );
 
         // Powertrain force in gear 4 at 10 m/s = 8687.5 N (slipping, see above), above the
@@ -321,13 +324,13 @@ mod tests {
     #[test]
     fn straight_line_braking() {
         let mut simulation_config = SimulationConfig::default();
-        simulation_config.initial_car.braking = true;
+        simulation_config.initial_car_state.braking = true;
 
         let net_force = calculate_net_force(
             &simulation_config.car,
-            &simulation_config.environment,
-            &simulation_config.initial_car,
+            &simulation_config.initial_car_state,
             &default_static_axle_loads(),
+            &aero_loads(&simulation_config),
         );
 
         // Brake force with 0.575 front bias on static loads = 6260.8696 N (see braking.rs)
@@ -338,14 +341,14 @@ mod tests {
     #[test]
     fn test_net_force_braking_at_standstill() {
         let mut simulation_config = SimulationConfig::default();
-        simulation_config.initial_car.braking = true;
-        simulation_config.initial_car.speed = 0.0;
+        simulation_config.initial_car_state.braking = true;
+        simulation_config.initial_car_state.speed = 0.0;
 
         let net_force = calculate_net_force(
             &simulation_config.car,
-            &simulation_config.environment,
-            &simulation_config.initial_car,
+            &simulation_config.initial_car_state,
             &default_static_axle_loads(),
+            &aero_loads(&simulation_config),
         );
 
         // A stopped car stays stopped: brakes and friction can't push it backwards, expected value: 0 N
@@ -355,14 +358,14 @@ mod tests {
     #[test]
     fn test_net_force_coasting_above_terminal_speed() {
         let mut simulation_config = prepared_config();
-        simulation_config.initial_car.speed = 95.0;
-        simulation_config.initial_car.gear = 8;
+        simulation_config.initial_car_state.speed = 95.0;
+        simulation_config.initial_car_state.gear = 8;
 
         let net_force = calculate_net_force(
             &simulation_config.car,
-            &simulation_config.environment,
-            &simulation_config.initial_car,
+            &simulation_config.initial_car_state,
             &default_static_axle_loads(),
+            &aero_loads(&simulation_config),
         );
 
         // Gear 8 at 95 m/s, clutch locked: n = 95 * 4.95 / (2 * PI * 0.36) = 207.896 Hz
@@ -381,14 +384,14 @@ mod tests {
     #[test]
     fn test_net_force_launch_from_standstill() {
         let mut simulation_config = prepared_config();
-        simulation_config.initial_car.speed = 0.0;
-        simulation_config.initial_car.gear = 1;
+        simulation_config.initial_car_state.speed = 0.0;
+        simulation_config.initial_car_state.gear = 1;
 
         let net_force = calculate_net_force(
             &simulation_config.car,
-            &simulation_config.environment,
-            &simulation_config.initial_car,
+            &simulation_config.initial_car_state,
             &default_static_axle_loads(),
+            &aero_loads(&simulation_config),
         );
 
         // Powertrain force in 1st gear, clutch slipping = 375 * 5.43 * 3.0 / 0.36 = 16968.75 N
@@ -405,16 +408,16 @@ mod tests {
     #[test]
     fn test_net_force_standstill_not_negative() {
         let mut simulation_config = prepared_config();
-        simulation_config.initial_car.speed = 0.0;
-        simulation_config.initial_car.gear = 1;
+        simulation_config.initial_car_state.speed = 0.0;
+        simulation_config.initial_car_state.gear = 1;
         // Breakaway friction set explicitly higher than the traction limit
         simulation_config.car.tyre.mu_breakaway = 0.7;
 
         let net_force = calculate_net_force(
             &simulation_config.car,
-            &simulation_config.environment,
-            &simulation_config.initial_car,
+            &simulation_config.initial_car_state,
             &default_static_axle_loads(),
+            &aero_loads(&simulation_config),
         );
 
         // Traction limited force = 3600 N, breakaway friction = 8000 * 0.7 = 5600 N

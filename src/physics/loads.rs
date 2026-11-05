@@ -1,6 +1,7 @@
 //! Functions related to axle normal loads
 
-use crate::physics::car::{ChassisGeometry, Mass};
+use crate::physics::car::Mass;
+use crate::physics::chassis::ChassisGeometry;
 use crate::physics::forces::calculate_normal_force;
 
 /// Normal forces acting on each axle
@@ -60,7 +61,8 @@ pub(crate) fn calculate_axle_loads(
 
 #[cfg(test)]
 mod tests {
-    use crate::physics::car::{ChassisGeometry, Mass};
+    use crate::physics::car::Mass;
+    use crate::physics::chassis::ChassisGeometry;
     use crate::physics::loads::{AxleLoads, calculate_axle_loads, calculate_static_axle_loads};
 
     fn test_mass() -> Mass {

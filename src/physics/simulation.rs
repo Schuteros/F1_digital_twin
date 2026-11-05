@@ -1,32 +1,35 @@
-use crate::physics::aero::calculate_aero_loads;
+use crate::physics::aero::{AeroLoads, calculate_aero_loads};
 use crate::physics::car::Car;
-use crate::physics::chassis::{
-    CornerSuspension, calculate_axle_distances, calculate_body_accelerations_from_state,
-    calculate_natural_frequencies, calculate_tyre_loads, sum_axle_loads,
-    update_suspension_positions, update_suspension_velocities,
-};
+use crate::physics::car_state_log::CarStateLog;
+use crate::physics::chassis::calculate_axle_distances;
 use crate::physics::environment::Environment;
 use crate::physics::forces::{calculate_acceleration, calculate_net_force};
 use crate::physics::integrators::euler;
+use crate::physics::loads::AxleLoads;
 use crate::physics::powertrain::{
-    Drivetrain, Powertrain, calculate_clutch_lock_speeds, calculate_transmission_input_revs,
-    calculate_upshift_speeds, count_down_shift_time, select_gear,
+    Drivetrain, Powertrain, calculate_engine_revs_from_wheel_speed, count_down_shift_time,
+    fill_powertrain_tables, select_gear,
 };
 use crate::physics::states::CarState;
+use crate::physics::suspension::{
+    CornerForces, CornerSuspension, StaticCarValues, calculate_axle_forces,
+    calculate_body_accelerations, calculate_corner_forces_from_state, calculate_corner_tyre_loads,
+    calculate_natural_frequencies, calculate_static_car_values, sum_axle_loads,
+    update_suspension_positions, update_suspension_velocities,
+};
 use crate::physics::track::{Track, find_active_braking_zone, is_braking_zone};
 
-/// Holds all the values needed for the simulation
-#[derive(Debug, PartialEq)]
-pub(crate) struct SimulationState {
-    pub(crate) car: CarState,
-    pub(crate) time: f64, // Seconds (s)
-}
+/// Allowed difference between mass.front + mass.rear and mass.total in kilograms, kg
+const MASS_SUM_TOLERANCE: f64 = 1e-6;
+
+/// Semi-implicit Euler is only stable for omega_max * time_step below this (docs/11 section 11.8)
+const STABILITY_LIMIT: f64 = 2.0;
 
 /// Holds all the initial values to start simulation
 #[derive(Debug, PartialEq)]
 pub struct SimulationConfig {
     /// Initial state of the car at the start of the simulation
-    pub initial_car: CarState,
+    pub initial_car_state: CarState,
 
     /// Car model containing all the specs and assumptions of the car
     pub car: Car,
@@ -53,27 +56,551 @@ pub struct SimulationConfig {
     /// * Smaller value increases accuracy of the simulation, but increases computation time linearly
     /// * Larger value decreases computation time linearly, but at cost of reduced accuracy of the simulation
     pub time_step: f64,
+
+    /// Values that stay the same for the whole run (axle distances, static corner loads, aero
+    /// points). Zero in Default and in a loaded config, filled by `prepare`.
+    pub(crate) static_values: StaticCarValues,
 }
 
 impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
-            initial_car: CarState::default(),
+            initial_car_state: CarState::default(),
             car: Car::default(),
             environment: Environment::default(),
             track: Track::default(),
             start_time: 0.0,
             end_time: 1.0,
             time_step: 0.001,
+            static_values: StaticCarValues::default(),
         }
     }
 }
 
-/// Allowed difference between mass.front + mass.rear and mass.total in kilograms, kg
-const MASS_SUM_TOLERANCE: f64 = 1e-6;
+/// Holds all the values needed for the simulation
+#[derive(Debug, PartialEq)]
+pub(crate) struct SimulationState {
+    pub(crate) car: CarState,
+    pub(crate) time: f64, // Seconds (s)
+}
 
-/// Semi-implicit Euler is only stable for omega_max * time_step below this (docs/11 section 11.8)
-const STABILITY_LIMIT: f64 = 2.0;
+impl SimulationState {
+    pub fn new(config: &SimulationConfig) -> Self {
+        Self {
+            car: config.initial_car_state,
+            time: config.start_time,
+        }
+    }
+}
+
+/// Loads on the car from the state at the start of a step. They are calculated once per step
+/// and used by both the longitudinal acceleration and the body accelerations.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StepLoads {
+    /// Clamped suspension force of each corner on top of its static load in Newtons, N
+    pub corner_forces: CornerForces,
+    /// Axle normal loads (sum of the corner tyre loads) in Newtons, N
+    pub axle_loads: AxleLoads,
+    /// Drag and downforce at the speed the step starts from in Newtons, N
+    pub aero_loads: AeroLoads,
+}
+
+/// Function to start simulation and iterates trough simulation steps.
+///
+/// Fills the powertrain shift tables in `simulation_config` first (`SimulationConfig::prepare`).
+/// With a `log`, the car state is written to it at the start and after logged steps.
+pub fn start_simulation(
+    simulation_config: &mut SimulationConfig,
+    mut log: Option<&mut CarStateLog>,
+    verbose: bool,
+) -> SimulationState {
+    // An invalid config is a setup error, not a runtime condition, so fail loudly.
+    // Callers who want to handle it gracefully can call `prepare()` themselves first.
+    if let Err(message) = simulation_config.prepare() {
+        panic!("Invalid simulation config: {}", message);
+    }
+    let simulation_config = &*simulation_config;
+
+    let mut simulation_state = SimulationState::new(simulation_config);
+
+    if verbose {
+        println!(
+            "Speed {:.2} m/s | Distance {:.2} m",
+            simulation_state.car.speed, simulation_state.car.distance
+        );
+    }
+
+    // Step count is computed up front: accumulating `time += time_step` drifts in
+    // floating point and can run one extra step (e.g. 5.0 s / 0.004 s gives 1251 steps, not 1250).
+    let total_steps = calculate_total_steps(simulation_config);
+    let mut step: u64 = 0;
+
+    if let Some(log) = log.as_deref_mut() {
+        log.record(step, &simulation_state, false);
+    }
+
+    while step < total_steps && !is_car_stopped(&simulation_state.car) {
+        simulation_step(&mut simulation_state, simulation_config);
+        step += 1;
+        simulation_state.time =
+            simulation_config.start_time + step as f64 * simulation_config.time_step;
+
+        if let Some(log) = log.as_deref_mut() {
+            let last = step == total_steps || is_car_stopped(&simulation_state.car);
+            log.record(step, &simulation_state, last);
+        }
+    }
+
+    if verbose {
+        println!(
+            "Final: Speed {:.2} m/s | Distance {:.2} m",
+            simulation_state.car.speed, simulation_state.car.distance
+        );
+    }
+
+    simulation_state
+}
+
+/// Simulation step updates simulation runner
+fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &SimulationConfig) {
+    simulation_state.car.active_braking_zone = find_active_braking_zone(
+        simulation_state.car.distance,
+        &simulation_config.track.braking_zones,
+        simulation_state.car.active_braking_zone,
+    );
+
+    simulation_state.car.braking = is_braking_zone(
+        &simulation_config.track.braking_zones,
+        simulation_state.car.distance,
+        simulation_state.car.active_braking_zone,
+    );
+
+    let powertrain = &simulation_config.car.powertrain;
+
+    // docs/12 section 12.10, steps 1 and 2: no new shift while one is in progress. A gear
+    // change starts the shift timer, and the step that starts the shift is its first step
+    // without drive, so 5 ms at 1 ms steps is exactly 5 steps without drive.
+    if simulation_state.car.shift_time_left <= 0.0 {
+        let gear = select_gear(
+            powertrain,
+            simulation_state.car.gear,
+            simulation_state.car.speed,
+        );
+
+        if gear != simulation_state.car.gear {
+            simulation_state.car.gear = gear;
+            simulation_state.car.shift_time_left = powertrain.shift_time;
+        }
+    }
+
+    // Step 3: locked engine speed for the current gear (docs/12, equation 12.2)
+    simulation_state.car.revs_hz = calculate_engine_revs_from_wheel_speed(
+        powertrain,
+        simulation_config.car.tyre.wheel_radius,
+        simulation_state.car.gear,
+        simulation_state.car.speed,
+    );
+
+    // Steps 4 and 5 (docs/12 section 12.10) with docs/11 section 11.8, steps 1 to 4: corner
+    // forces and tyre loads from the suspension state and aero loads from the speed at the start
+    // of the step (docs/13 section 13.5), then a_x. The powertrain force is the full-throttle
+    // force in the gear (12.10), 0 while shift_time_left > 0, capped at the tyre grip limit.
+    let step_loads = calculate_step_loads(simulation_config, &simulation_state.car);
+    simulation_state.car.acceleration =
+        get_car_acceleration(simulation_config, &simulation_state.car, &step_loads);
+
+    // The drive for this step is decided, so count the shift timer down (docs/12 section 12.8)
+    if simulation_state.car.shift_time_left > 0.0 {
+        simulation_state.car.shift_time_left = count_down_shift_time(
+            simulation_state.car.shift_time_left,
+            simulation_config.time_step,
+        );
+    }
+
+    // Step 5: body accelerations from the same corner forces and aero loads and this step's a_x
+    let car = &simulation_config.car;
+    let static_values = &simulation_config.static_values;
+    let body_accelerations = calculate_body_accelerations(
+        car.mass.total,
+        car.suspension.pitch_inertia,
+        car.geometry.cog_height,
+        &static_values.axle_distances,
+        simulation_state.car.acceleration,
+        &calculate_axle_forces(&step_loads.corner_forces),
+        &step_loads.aero_loads,
+        &static_values.aero_points,
+    );
+
+    // Step 6: update velocities
+    simulation_state.car.speed = get_car_speed(
+        &simulation_state.car,
+        simulation_config,
+        simulation_state.car.acceleration,
+    );
+
+    if simulation_state.car.speed <= 0.0 && simulation_state.car.braking {
+        // Car has stopped: it is no longer decelerating. From the next step a_x = 0
+        // (net force is 0 at standstill), and the body settles back to static.
+        simulation_state.car.speed = 0.0;
+        simulation_state.car.acceleration = 0.0;
+    }
+
+    simulation_state.car.suspension = update_suspension_velocities(
+        &simulation_state.car.suspension,
+        &body_accelerations,
+        simulation_config.time_step,
+    );
+
+    // Step 7: update positions with the new velocities (semi-implicit Euler)
+    simulation_state.car.distance = get_car_distance(
+        &simulation_state.car,
+        simulation_config,
+        simulation_state.car.speed,
+    );
+
+    simulation_state.car.suspension = update_suspension_positions(
+        &simulation_state.car.suspension,
+        simulation_config.time_step,
+    );
+
+    simulation_state.time += simulation_config.time_step;
+}
+
+/// Calculates how many time steps are needed to reach end_time from start_time
+fn calculate_total_steps(simulation_config: &SimulationConfig) -> u64 {
+    let span = simulation_config.end_time - simulation_config.start_time;
+    if span <= 0.0 || simulation_config.time_step <= 0.0 {
+        return 0;
+    }
+
+    let steps = span / simulation_config.time_step;
+    let rounded = steps.round();
+
+    // Treat values within floating point noise of a whole number as that whole number
+    if (steps - rounded).abs() < 1e-9 * rounded.max(1.0) {
+        rounded as u64
+    } else {
+        steps.ceil() as u64
+    }
+}
+
+/// Checks if the car has stopped and won't continue to drive
+fn is_car_stopped(car_state: &CarState) -> bool {
+    car_state.braking && car_state.speed == 0.0
+}
+
+/// Calculates the loads on the car from its state at the start of a step: corner forces and
+/// tyre loads from the suspension state (docs/11 section 11.8, steps 1 to 3) and the aero
+/// loads from the speed (docs/13 section 13.5). Needs `prepare` to have run.
+pub(crate) fn calculate_step_loads(
+    simulation_config: &SimulationConfig,
+    car_state: &CarState,
+) -> StepLoads {
+    let static_values = &simulation_config.static_values;
+    let corner_forces = calculate_corner_forces_from_state(
+        &simulation_config.car.suspension,
+        static_values,
+        &car_state.suspension,
+    );
+    let tyre_loads =
+        calculate_corner_tyre_loads(&static_values.static_corner_loads, &corner_forces);
+
+    StepLoads {
+        corner_forces,
+        axle_loads: sum_axle_loads(&tyre_loads),
+        aero_loads: calculate_aero_loads(
+            &simulation_config.car.aero,
+            simulation_config.environment.air_density,
+            car_state.speed,
+        ),
+    }
+}
+
+/// Calculates car acceleration a_x in m/s^2 from the loads at the start of the step.
+///
+/// The axle loads come from the suspension state, not from a_x (docs/11 section 11.8, steps
+/// 1 to 4), so there is no circular dependency between acceleration and load transfer.
+pub(crate) fn get_car_acceleration(
+    simulation_config: &SimulationConfig,
+    car_state: &CarState,
+    step_loads: &StepLoads,
+) -> f64 {
+    let car = &simulation_config.car;
+    let force = calculate_net_force(
+        car,
+        car_state,
+        &step_loads.axle_loads,
+        &step_loads.aero_loads,
+    );
+
+    calculate_acceleration(force, car.mass.total)
+}
+
+/// Calculates car speed given the current car state, simulation_config and acceleration of this step.
+fn get_car_speed(
+    car_state: &CarState,
+    simulation_config: &SimulationConfig,
+    acceleration: f64,
+) -> f64 {
+    euler(car_state.speed, acceleration, simulation_config.time_step)
+}
+
+/// Calculates car distance given the current car model, state, environment model and simulation_config.
+fn get_car_distance(car_state: &CarState, simulation_config: &SimulationConfig, speed: f64) -> f64 {
+    euler(car_state.distance, speed, simulation_config.time_step)
+}
+
+impl SimulationConfig {
+    /// Validates the config, then fills everything that follows from it:
+    /// * `static_values`: axle distances, static corner loads and aero points,
+    /// * the powertrain values that only depend on car data: `peak_torque`, `clutch_lock_speeds`
+    ///   (docs/12, equation 12.8) and `upshift_speeds` (docs/12 section 12.6),
+    /// * the calculated part of `initial_car_state` (`calculate_initial_car_state`).
+    ///
+    /// Runs before the simulation (docs/12 section 12.10, before the simulation). Running it
+    /// again gives the same result.
+    pub fn prepare(&mut self) -> Result<(), String> {
+        self.validate()?;
+
+        self.static_values =
+            calculate_static_car_values(&self.car, self.environment.g_acceleration);
+        fill_powertrain_tables(&mut self.car.powertrain, self.car.tyre.wheel_radius);
+
+        // The acceleration needs the values above, so they are filled first
+        self.initial_car_state = calculate_initial_car_state(self);
+
+        Ok(())
+    }
+
+    /// Checks the config for values the physics model can't handle.
+    /// Returns a message describing the first invalid value found.
+    pub fn validate(&self) -> Result<(), String> {
+        let front_bias = self.car.brakes.front_bias;
+        if !(0.0..=1.0).contains(&front_bias) {
+            return Err(format!(
+                "brakes.front_bias must be in 0.0..=1.0, got {}",
+                front_bias
+            ));
+        }
+
+        if let Drivetrain::AllWheelDrive { front_torque_split } = self.car.powertrain.drivetrain
+            && !(0.0..=1.0).contains(&front_torque_split)
+        {
+            return Err(format!(
+                "AllWheelDrive front_torque_split must be in 0.0..=1.0, got {}",
+                front_torque_split
+            ));
+        }
+
+        validate_powertrain(&self.car.powertrain)?;
+
+        // The shift tables and the wheel force divide by the wheel radius (docs/12, equation 12.3)
+        let wheel_radius = self.car.tyre.wheel_radius;
+        if !wheel_radius.is_finite() || wheel_radius <= 0.0 {
+            return Err(format!(
+                "tyre.wheel_radius must be > 0 m, got {}",
+                wheel_radius
+            ));
+        }
+
+        let top_gear = self.car.powertrain.gear_ratios.len();
+        let initial_gear = self.initial_car_state.gear as usize;
+        if !(1..=top_gear).contains(&initial_gear) {
+            return Err(format!(
+                "initial_car_state.gear must be in 1..={}, got {}",
+                top_gear, initial_gear
+            ));
+        }
+
+        let initial_car_state = &self.initial_car_state;
+        if !initial_car_state.speed.is_finite() || initial_car_state.speed < 0.0 {
+            return Err(format!(
+                "initial_car_state.speed must be >= 0 m/s, got {}",
+                initial_car_state.speed
+            ));
+        }
+
+        if !initial_car_state.shift_time_left.is_finite() || initial_car_state.shift_time_left < 0.0
+        {
+            return Err(format!(
+                "initial_car_state.shift_time_left must be >= 0 s, got {}",
+                initial_car_state.shift_time_left
+            ));
+        }
+
+        let initial_suspension = &initial_car_state.suspension;
+        for (field, value) in [
+            ("distance", initial_car_state.distance),
+            ("suspension.heave", initial_suspension.heave),
+            (
+                "suspension.heave_velocity",
+                initial_suspension.heave_velocity,
+            ),
+            ("suspension.pitch", initial_suspension.pitch),
+            ("suspension.pitch_rate", initial_suspension.pitch_rate),
+        ] {
+            if !value.is_finite() {
+                return Err(format!(
+                    "initial_car_state.{} must be finite, got {}",
+                    field, value
+                ));
+            }
+        }
+
+        let wheelbase = self.car.geometry.wheelbase;
+        if !wheelbase.is_finite() || wheelbase <= 0.0 {
+            return Err(format!(
+                "geometry.wheelbase must be > 0 m, got {}",
+                wheelbase
+            ));
+        }
+
+        let cog_height = self.car.geometry.cog_height;
+        if !cog_height.is_finite() || cog_height < 0.0 {
+            return Err(format!(
+                "geometry.cog_height must be >= 0 m, got {}",
+                cog_height
+            ));
+        }
+
+        if !self.time_step.is_finite() || self.time_step <= 0.0 {
+            return Err(format!("time_step must be > 0 s, got {}", self.time_step));
+        }
+
+        for (index, &(start, end)) in self.track.braking_zones.iter().enumerate() {
+            if !start.is_finite() || !end.is_finite() {
+                return Err(format!(
+                    "track.braking_zones[{}] must be finite, got {} m to {} m",
+                    index, start, end
+                ));
+            }
+
+            if end < start {
+                return Err(format!(
+                    "track.braking_zones[{}] end must be >= start, got {} m < {} m",
+                    index, end, start
+                ));
+            }
+        }
+
+        let mass = &self.car.mass;
+        let mass_difference = (mass.front + mass.rear - mass.total).abs();
+        if mass_difference.is_nan() || mass_difference > MASS_SUM_TOLERANCE {
+            return Err(format!(
+                "mass.front + mass.rear must equal mass.total, got {} + {} != {}",
+                mass.front, mass.rear, mass.total
+            ));
+        }
+
+        let aero = &self.car.aero;
+        for (field, value) in [
+            ("downforce_coefficient", aero.downforce_coefficient),
+            (
+                "downforce_centre_of_pressure_from_front_axle",
+                aero.downforce_centre_of_pressure_from_front_axle,
+            ),
+            (
+                "drag_centre_of_pressure_height",
+                aero.drag_centre_of_pressure_height,
+            ),
+        ] {
+            // Any finite value is allowed: C_down < 0 is lift, and the centre of pressure may
+            // lie outside the wheelbase (docs/13 section 13.5)
+            if !value.is_finite() {
+                return Err(format!("aero.{} must be finite, got {}", field, value));
+            }
+        }
+
+        let suspension = &self.car.suspension;
+        for (name, corner) in [
+            ("front_left", &suspension.front_left),
+            ("front_right", &suspension.front_right),
+            ("rear_left", &suspension.rear_left),
+            ("rear_right", &suspension.rear_right),
+        ] {
+            validate_corner_suspension(name, corner)?;
+        }
+
+        if !suspension.pitch_inertia.is_finite() || suspension.pitch_inertia <= 0.0 {
+            return Err(format!(
+                "suspension.pitch_inertia must be > 0 kg·m^2, got {}",
+                suspension.pitch_inertia
+            ));
+        }
+
+        for (field, ride_height) in [
+            (
+                "static_ride_height_front",
+                suspension.static_ride_height_front,
+            ),
+            (
+                "static_ride_height_rear",
+                suspension.static_ride_height_rear,
+            ),
+        ] {
+            if !ride_height.is_finite() {
+                return Err(format!(
+                    "suspension.{} must be finite, got {}",
+                    field, ride_height
+                ));
+            }
+        }
+
+        // Time step stability (docs/11 section 11.8) with the uncoupled frequencies (11.17),
+        // using the stiffest rate of each corner (spring + end stop)
+        let distances = calculate_axle_distances(mass, &self.car.geometry);
+        let frequencies = calculate_natural_frequencies(
+            mass.total,
+            suspension.pitch_inertia,
+            &distances,
+            calculate_stiffest_corner_rate(&suspension.front_left)
+                + calculate_stiffest_corner_rate(&suspension.front_right),
+            calculate_stiffest_corner_rate(&suspension.rear_left)
+                + calculate_stiffest_corner_rate(&suspension.rear_right),
+        );
+        let frequency_max = frequencies.heave.max(frequencies.pitch);
+        let stability = frequency_max * self.time_step;
+        if stability.is_nan() || stability >= STABILITY_LIMIT {
+            return Err(format!(
+                "time_step must satisfy omega_max * time_step < {}, got {} rad/s * {} s = {}",
+                STABILITY_LIMIT, frequency_max, self.time_step, stability
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+/// Calculates the parts of the starting car state that follow from the starting conditions
+/// (speed, distance, gear, shift time left, suspension state) and the config, the same way a
+/// simulation step does:
+/// * `active_braking_zone` and `braking` from the distance and the track,
+/// * `revs_hz`, the locked engine speed in the starting gear (docs/12, equation 12.2),
+/// * `acceleration`, a_x in the starting gear before any gear change (docs/11 section 11.8).
+///
+/// Needs the powertrain tables filled. The first simulation step recalculates all of these,
+/// so they don't change the results, they only make the starting state consistent.
+fn calculate_initial_car_state(simulation_config: &SimulationConfig) -> CarState {
+    let braking_zones = &simulation_config.track.braking_zones;
+    let mut car_state = simulation_config.initial_car_state;
+
+    car_state.active_braking_zone = find_active_braking_zone(car_state.distance, braking_zones, 0);
+    car_state.braking = is_braking_zone(
+        braking_zones,
+        car_state.distance,
+        car_state.active_braking_zone,
+    );
+    car_state.revs_hz = calculate_engine_revs_from_wheel_speed(
+        &simulation_config.car.powertrain,
+        simulation_config.car.tyre.wheel_radius,
+        car_state.gear,
+        car_state.speed,
+    );
+    let step_loads = calculate_step_loads(simulation_config, &car_state);
+    car_state.acceleration = get_car_acceleration(simulation_config, &car_state, &step_loads);
+
+    car_state
+}
 
 /// Checks one suspension corner. `name` is the corner's field name, used in the error message.
 fn validate_corner_suspension(name: &str, corner: &CornerSuspension) -> Result<(), String> {
@@ -205,6 +732,13 @@ fn validate_powertrain(powertrain: &Powertrain) -> Result<(), String> {
         }
     }
 
+    if !powertrain.primary_ratio.is_finite() || powertrain.primary_ratio <= 0.0 {
+        return Err(format!(
+            "powertrain.primary_ratio must be > 0, got {}",
+            powertrain.primary_ratio
+        ));
+    }
+
     if !powertrain.final_drive.is_finite() || powertrain.final_drive <= 0.0 {
         return Err(format!(
             "powertrain.final_drive must be > 0, got {}",
@@ -234,492 +768,20 @@ fn calculate_stiffest_corner_rate(corner: &CornerSuspension) -> f64 {
     corner.spring_rate + corner.bump_rate.max(corner.droop_rate)
 }
 
-impl SimulationConfig {
-    /// Checks the config for values the physics model can't handle.
-    /// Returns a message describing the first invalid value found.
-    pub fn validate(&self) -> Result<(), String> {
-        let front_bias = self.car.brakes.front_bias;
-        if !(0.0..=1.0).contains(&front_bias) {
-            return Err(format!(
-                "brakes.front_bias must be in 0.0..=1.0, got {}",
-                front_bias
-            ));
-        }
-
-        if let Drivetrain::AllWheelDrive { front_torque_split } = self.car.powertrain.drivetrain
-            && !(0.0..=1.0).contains(&front_torque_split)
-        {
-            return Err(format!(
-                "AllWheelDrive front_torque_split must be in 0.0..=1.0, got {}",
-                front_torque_split
-            ));
-        }
-
-        validate_powertrain(&self.car.powertrain)?;
-
-        // The shift tables and the wheel force divide by the wheel radius (docs/12, equation 12.3)
-        let wheel_radius = self.car.tyre.wheel_radius;
-        if !wheel_radius.is_finite() || wheel_radius <= 0.0 {
-            return Err(format!(
-                "tyre.wheel_radius must be > 0 m, got {}",
-                wheel_radius
-            ));
-        }
-
-        let top_gear = self.car.powertrain.gear_ratios.len();
-        let initial_gear = self.initial_car.gear as usize;
-        if !(1..=top_gear).contains(&initial_gear) {
-            return Err(format!(
-                "initial_car.gear must be in 1..={}, got {}",
-                top_gear, initial_gear
-            ));
-        }
-
-        let initial_car = &self.initial_car;
-        if !initial_car.speed.is_finite() || initial_car.speed < 0.0 {
-            return Err(format!(
-                "initial_car.speed must be >= 0 m/s, got {}",
-                initial_car.speed
-            ));
-        }
-
-        if !initial_car.shift_time_left.is_finite() || initial_car.shift_time_left < 0.0 {
-            return Err(format!(
-                "initial_car.shift_time_left must be >= 0 s, got {}",
-                initial_car.shift_time_left
-            ));
-        }
-
-        let initial_suspension = &initial_car.suspension;
-        for (field, value) in [
-            ("distance", initial_car.distance),
-            ("suspension.heave", initial_suspension.heave),
-            (
-                "suspension.heave_velocity",
-                initial_suspension.heave_velocity,
-            ),
-            ("suspension.pitch", initial_suspension.pitch),
-            ("suspension.pitch_rate", initial_suspension.pitch_rate),
-        ] {
-            if !value.is_finite() {
-                return Err(format!(
-                    "initial_car.{} must be finite, got {}",
-                    field, value
-                ));
-            }
-        }
-
-        let wheelbase = self.car.geometry.wheelbase;
-        if !wheelbase.is_finite() || wheelbase <= 0.0 {
-            return Err(format!(
-                "geometry.wheelbase must be > 0 m, got {}",
-                wheelbase
-            ));
-        }
-
-        let cog_height = self.car.geometry.cog_height;
-        if !cog_height.is_finite() || cog_height < 0.0 {
-            return Err(format!(
-                "geometry.cog_height must be >= 0 m, got {}",
-                cog_height
-            ));
-        }
-
-        if !self.time_step.is_finite() || self.time_step <= 0.0 {
-            return Err(format!("time_step must be > 0 s, got {}", self.time_step));
-        }
-
-        for (index, &(start, end)) in self.track.braking_zones.iter().enumerate() {
-            if !start.is_finite() || !end.is_finite() {
-                return Err(format!(
-                    "track.braking_zones[{}] must be finite, got {} m to {} m",
-                    index, start, end
-                ));
-            }
-
-            if end < start {
-                return Err(format!(
-                    "track.braking_zones[{}] end must be >= start, got {} m < {} m",
-                    index, end, start
-                ));
-            }
-        }
-
-        let mass = &self.car.mass;
-        let mass_difference = (mass.front + mass.rear - mass.total).abs();
-        if mass_difference.is_nan() || mass_difference > MASS_SUM_TOLERANCE {
-            return Err(format!(
-                "mass.front + mass.rear must equal mass.total, got {} + {} != {}",
-                mass.front, mass.rear, mass.total
-            ));
-        }
-
-        let aero = &self.car.aero;
-        for (field, value) in [
-            ("downforce_coefficient", aero.downforce_coefficient),
-            (
-                "downforce_centre_of_pressure_from_front_axle",
-                aero.downforce_centre_of_pressure_from_front_axle,
-            ),
-            (
-                "drag_centre_of_pressure_height",
-                aero.drag_centre_of_pressure_height,
-            ),
-        ] {
-            // Any finite value is allowed: C_down < 0 is lift, and the centre of pressure may
-            // lie outside the wheelbase (docs/13 section 13.5)
-            if !value.is_finite() {
-                return Err(format!("aero.{} must be finite, got {}", field, value));
-            }
-        }
-
-        let suspension = &self.car.suspension;
-        for (name, corner) in [
-            ("front_left", &suspension.front_left),
-            ("front_right", &suspension.front_right),
-            ("rear_left", &suspension.rear_left),
-            ("rear_right", &suspension.rear_right),
-        ] {
-            validate_corner_suspension(name, corner)?;
-        }
-
-        if !suspension.pitch_inertia.is_finite() || suspension.pitch_inertia <= 0.0 {
-            return Err(format!(
-                "suspension.pitch_inertia must be > 0 kg·m^2, got {}",
-                suspension.pitch_inertia
-            ));
-        }
-
-        for (field, ride_height) in [
-            (
-                "static_ride_height_front",
-                suspension.static_ride_height_front,
-            ),
-            (
-                "static_ride_height_rear",
-                suspension.static_ride_height_rear,
-            ),
-        ] {
-            if !ride_height.is_finite() {
-                return Err(format!(
-                    "suspension.{} must be finite, got {}",
-                    field, ride_height
-                ));
-            }
-        }
-
-        // Time step stability (docs/11 section 11.8) with the uncoupled frequencies (11.17),
-        // using the stiffest rate of each corner (spring + end stop)
-        let distances = calculate_axle_distances(mass, &self.car.geometry);
-        let frequencies = calculate_natural_frequencies(
-            mass.total,
-            suspension.pitch_inertia,
-            &distances,
-            calculate_stiffest_corner_rate(&suspension.front_left)
-                + calculate_stiffest_corner_rate(&suspension.front_right),
-            calculate_stiffest_corner_rate(&suspension.rear_left)
-                + calculate_stiffest_corner_rate(&suspension.rear_right),
-        );
-        let frequency_max = frequencies.heave.max(frequencies.pitch);
-        let stability = frequency_max * self.time_step;
-        if stability.is_nan() || stability >= STABILITY_LIMIT {
-            return Err(format!(
-                "time_step must satisfy omega_max * time_step < {}, got {} rad/s * {} s = {}",
-                STABILITY_LIMIT, frequency_max, self.time_step, stability
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Validates the config, then fills everything that follows from it:
-    /// * the powertrain tables that only depend on car data: `clutch_lock_speeds`
-    ///   (docs/12, equation 12.8) and `upshift_speeds` (docs/12 section 12.6),
-    /// * the calculated part of `initial_car` (`calculate_initial_car_state`).
-    ///
-    /// Runs before the simulation (docs/12 section 12.10, before the simulation). Running it
-    /// again gives the same result.
-    pub fn prepare(&mut self) -> Result<(), String> {
-        self.validate()?;
-
-        let wheel_radius = self.car.tyre.wheel_radius;
-        let powertrain = &mut self.car.powertrain;
-        powertrain.clutch_lock_speeds = calculate_clutch_lock_speeds(powertrain, wheel_radius);
-        // The upshift scan starts at the clutch lock speeds, so they are filled first
-        powertrain.upshift_speeds = calculate_upshift_speeds(powertrain, wheel_radius);
-
-        // The acceleration needs the clutch lock speeds, so the tables are filled first
-        self.initial_car = calculate_initial_car_state(self);
-
-        Ok(())
-    }
-}
-
-/// Calculates the parts of the starting car state that follow from the starting conditions
-/// (speed, distance, gear, shift time left, suspension state) and the config, the same way a
-/// simulation step does:
-/// * `active_braking_zone` and `braking` from the distance and the track,
-/// * `revs_hz`, the locked engine speed in the starting gear (docs/12, equation 12.2),
-/// * `acceleration`, a_x in the starting gear before any gear change (docs/11 section 11.8).
-///
-/// Needs the powertrain tables filled. The first simulation step recalculates all of these,
-/// so they don't change the results, they only make the starting state consistent.
-fn calculate_initial_car_state(simulation_config: &SimulationConfig) -> CarState {
-    let braking_zones = &simulation_config.track.braking_zones;
-    let mut car_state = simulation_config.initial_car;
-
-    car_state.active_braking_zone = find_active_braking_zone(car_state.distance, braking_zones, 0);
-    car_state.braking = is_braking_zone(
-        braking_zones,
-        car_state.distance,
-        car_state.active_braking_zone,
-    );
-    car_state.revs_hz = calculate_transmission_input_revs(
-        &simulation_config.car.powertrain,
-        simulation_config.car.tyre.wheel_radius,
-        car_state.gear,
-        car_state.speed,
-    );
-    car_state.acceleration = get_car_acceleration(
-        &simulation_config.car,
-        &car_state,
-        &simulation_config.environment,
-    );
-
-    car_state
-}
-
-impl SimulationState {
-    pub fn new(config: &SimulationConfig) -> Self {
-        Self {
-            car: config.initial_car,
-            time: config.start_time,
-        }
-    }
-}
-
-/// Calculates car acceleration in m/s^2 given the current car model, state, and environment.
-///
-/// Axle loads are the corner tyre loads from the suspension state at the start of the step
-/// (docs/11 section 11.8, steps 1 to 4), so there is no circular dependency between
-/// acceleration and load transfer.
-pub fn get_car_acceleration(car: &Car, car_state: &CarState, environment: &Environment) -> f64 {
-    let tyre_loads = calculate_tyre_loads(car, &car_state.suspension, environment.g_acceleration);
-    let axle_loads = sum_axle_loads(&tyre_loads);
-    let force = calculate_net_force(car, environment, car_state, &axle_loads);
-
-    calculate_acceleration(force, car.mass.total)
-}
-
-/// Calculates car speed given the current car state, simulation_config and acceleration of this step.
-fn get_car_speed(
-    car_state: &CarState,
-    simulation_config: &SimulationConfig,
-    acceleration: f64,
-) -> f64 {
-    euler(car_state.speed, acceleration, simulation_config.time_step)
-}
-
-/// Calculates car distance given the current car model, state, environment model and simulation_config.
-fn get_car_distance(car_state: &CarState, simulation_config: &SimulationConfig, speed: f64) -> f64 {
-    euler(car_state.distance, speed, simulation_config.time_step)
-}
-
-/// Checks if the car has stopped and won't continue to drive
-fn is_car_stopped(car_state: &CarState) -> bool {
-    car_state.braking && car_state.speed == 0.0
-}
-
-/// Calculates how many time steps are needed to reach end_time from start_time
-fn calculate_total_steps(simulation_config: &SimulationConfig) -> u64 {
-    let span = simulation_config.end_time - simulation_config.start_time;
-    if span <= 0.0 || simulation_config.time_step <= 0.0 {
-        return 0;
-    }
-
-    let steps = span / simulation_config.time_step;
-    let rounded = steps.round();
-
-    // Treat values within floating point noise of a whole number as that whole number
-    if (steps - rounded).abs() < 1e-9 * rounded.max(1.0) {
-        rounded as u64
-    } else {
-        steps.ceil() as u64
-    }
-}
-
-/// Simulation step updates simulation runner
-fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &SimulationConfig) {
-    simulation_state.car.active_braking_zone = find_active_braking_zone(
-        simulation_state.car.distance,
-        &simulation_config.track.braking_zones,
-        simulation_state.car.active_braking_zone,
-    );
-
-    simulation_state.car.braking = is_braking_zone(
-        &simulation_config.track.braking_zones,
-        simulation_state.car.distance,
-        simulation_state.car.active_braking_zone,
-    );
-
-    let powertrain = &simulation_config.car.powertrain;
-
-    // docs/12 section 12.10, steps 1 and 2: no new shift while one is in progress. A gear
-    // change starts the shift timer, and the step that starts the shift is its first step
-    // without drive, so 5 ms at 1 ms steps is exactly 5 steps without drive.
-    if simulation_state.car.shift_time_left <= 0.0 {
-        let gear = select_gear(
-            powertrain,
-            simulation_state.car.gear,
-            simulation_state.car.speed,
-            simulation_state.car.braking,
-        );
-
-        if gear != simulation_state.car.gear {
-            simulation_state.car.gear = gear;
-            simulation_state.car.shift_time_left = powertrain.shift_time;
-        }
-    }
-
-    // Step 3: locked transmission input speed for the current gear (docs/12, equation 12.2)
-    simulation_state.car.revs_hz = calculate_transmission_input_revs(
-        powertrain,
-        simulation_config.car.tyre.wheel_radius,
-        simulation_state.car.gear,
-        simulation_state.car.speed,
-    );
-
-    // Steps 4 and 5 (docs/12 section 12.10) with docs/11 section 11.8, steps 1 to 4: tyre loads
-    // from the suspension state, then a_x. The powertrain force is the best force in the gear
-    // (12.10), 0 while shift_time_left > 0, capped at the tyre grip limit.
-    simulation_state.car.acceleration = get_car_acceleration(
-        &simulation_config.car,
-        &simulation_state.car,
-        &simulation_config.environment,
-    );
-
-    // The drive for this step is decided, so count the shift timer down (docs/12 section 12.8)
-    if simulation_state.car.shift_time_left > 0.0 {
-        simulation_state.car.shift_time_left = count_down_shift_time(
-            simulation_state.car.shift_time_left,
-            simulation_config.time_step,
-        );
-    }
-
-    // Step 5: aero forces from the speed at the start of the step (docs/13 section 13.5), then
-    // body accelerations from the same suspension state, this step's a_x and the aero forces
-    let aero_loads = calculate_aero_loads(
-        &simulation_config.car.aero,
-        simulation_config.environment.air_density,
-        simulation_state.car.speed,
-    );
-    let body_accelerations = calculate_body_accelerations_from_state(
-        &simulation_config.car,
-        &simulation_state.car.suspension,
-        simulation_config.environment.g_acceleration,
-        simulation_state.car.acceleration,
-        &aero_loads,
-    );
-
-    // Step 6: update velocities
-    simulation_state.car.speed = get_car_speed(
-        &simulation_state.car,
-        simulation_config,
-        simulation_state.car.acceleration,
-    );
-
-    if simulation_state.car.speed <= 0.0 && simulation_state.car.braking {
-        // Car has stopped: it is no longer decelerating. From the next step a_x = 0
-        // (net force is 0 at standstill), and the body settles back to static.
-        simulation_state.car.speed = 0.0;
-        simulation_state.car.acceleration = 0.0;
-    }
-
-    simulation_state.car.suspension = update_suspension_velocities(
-        &simulation_state.car.suspension,
-        &body_accelerations,
-        simulation_config.time_step,
-    );
-
-    // Step 7: update positions with the new velocities (semi-implicit Euler)
-    simulation_state.car.distance = get_car_distance(
-        &simulation_state.car,
-        simulation_config,
-        simulation_state.car.speed,
-    );
-
-    simulation_state.car.suspension = update_suspension_positions(
-        &simulation_state.car.suspension,
-        simulation_config.time_step,
-    );
-
-    simulation_state.time += simulation_config.time_step;
-}
-
-/// Function to start simulation and iterates trough simulation steps.
-///
-/// Fills the powertrain shift tables in `simulation_config` first (`SimulationConfig::prepare`).
-pub fn start_simulation(
-    simulation_config: &mut SimulationConfig,
-    telemetry: bool,
-    verbose: bool,
-) -> SimulationState {
-    // An invalid config is a setup error, not a runtime condition, so fail loudly.
-    // Callers who want to handle it gracefully can call `prepare()` themselves first.
-    if let Err(message) = simulation_config.prepare() {
-        panic!("Invalid simulation config: {}", message);
-    }
-    let simulation_config = &*simulation_config;
-
-    let mut simulation_state = SimulationState::new(simulation_config);
-
-    if verbose {
-        println!(
-            "Speed {:.2} m/s | Distance {:.2} m",
-            simulation_state.car.speed, simulation_state.car.distance
-        );
-    }
-
-    // Step count is computed up front: accumulating `time += time_step` drifts in
-    // floating point and can run one extra step (e.g. 5.0 s / 0.004 s gives 1251 steps, not 1250).
-    let total_steps = calculate_total_steps(simulation_config);
-    let mut step: u64 = 0;
-
-    while step < total_steps && !is_car_stopped(&simulation_state.car) {
-        if telemetry {
-            // Telemetry recording logic here
-        }
-
-        simulation_step(&mut simulation_state, simulation_config);
-        step += 1;
-        simulation_state.time =
-            simulation_config.start_time + step as f64 * simulation_config.time_step;
-    }
-
-    if verbose {
-        println!(
-            "Final: Speed {:.2} m/s | Distance {:.2} m",
-            simulation_state.car.speed, simulation_state.car.distance
-        );
-    }
-
-    simulation_state
-}
-
 #[cfg(test)]
 mod tests {
     use crate::physics::aero::calculate_aero_loads;
     use crate::physics::aero::calculate_air_drag;
-    use crate::physics::chassis::{SuspensionState, calculate_tyre_loads, sum_axle_loads};
     use crate::physics::powertrain::{
-        Drivetrain, calculate_best_force, calculate_engine_torque, calculate_peak_torque,
-        calculate_total_ratio, calculate_transmission_input_revs,
+        Drivetrain, calculate_engine_revs_from_wheel_speed, calculate_engine_torque,
+        calculate_peak_torque, calculate_powertrain_force, calculate_total_ratio,
     };
     use crate::physics::simulation::{
-        SimulationConfig, SimulationState, calculate_total_steps, get_car_acceleration,
-        get_car_distance, get_car_speed, simulation_step, start_simulation,
+        SimulationConfig, SimulationState, calculate_step_loads, calculate_total_steps,
+        get_car_acceleration, get_car_distance, get_car_speed, simulation_step, start_simulation,
     };
     use crate::physics::states::CarState;
+    use crate::physics::suspension::{SuspensionState, calculate_tyre_loads, sum_axle_loads};
     use crate::physics::track::Track;
     use crate::physics::tyres::{calculate_current_tyre_friction, calculate_split_force_limit};
 
@@ -737,9 +799,9 @@ mod tests {
     /// Default config from rest at 0 m, in 1st gear, with no braking zones
     fn standing_start_config() -> SimulationConfig {
         let mut simulation_config = SimulationConfig::default();
-        simulation_config.initial_car.speed = 0.0;
-        simulation_config.initial_car.distance = 0.0;
-        simulation_config.initial_car.gear = 1;
+        simulation_config.initial_car_state.speed = 0.0;
+        simulation_config.initial_car_state.distance = 0.0;
+        simulation_config.initial_car_state.gear = 1;
         simulation_config.track.braking_zones = vec![];
         prepared(simulation_config)
     }
@@ -802,16 +864,18 @@ mod tests {
         1 + upshifts_passed as u8
     }
 
+    /// a_x from the state, the same way a simulation step calculates it
+    fn acceleration(simulation_config: &SimulationConfig, car_state: &CarState) -> f64 {
+        let step_loads = calculate_step_loads(simulation_config, car_state);
+        get_car_acceleration(simulation_config, car_state, &step_loads)
+    }
+
     #[test]
     fn test_get_car_acceleration() {
         let mut simulation_config = prepared(SimulationConfig::default());
 
-        simulation_config.initial_car.gear = 4;
-        let acceleration = get_car_acceleration(
-            &simulation_config.car,
-            &simulation_config.initial_car,
-            &simulation_config.environment,
-        );
+        simulation_config.initial_car_state.gear = 4;
+        let acceleration = acceleration(&simulation_config, &simulation_config.initial_car_state);
 
         // from forces.rs: gear 4 at 10 m/s slips and gives 8687.5 N, the RWD tyres limit it to
         // 3600 N, net force = 3600 - 282.875 = 3317.125 N. Knowing total mass expected value:
@@ -829,13 +893,10 @@ mod tests {
         // 1st gear at 10 m/s, below the 18.514 m/s lock speed: the clutch slips and the
         // powertrain force = 375 * 5.43 * 3.0 / 0.36 = 16968.75 N, so the rear (driven) axle
         // grip is the limit
-        simulation_config.initial_car.gear = 1;
+        simulation_config.initial_car_state.gear = 1;
 
-        let acceleration_static = get_car_acceleration(
-            &simulation_config.car,
-            &simulation_config.initial_car,
-            &simulation_config.environment,
-        );
+        let acceleration_static =
+            acceleration(&simulation_config, &simulation_config.initial_car_state);
 
         // Suspension at static -> static rear load 4000 N -> traction 0.9 * 4000 N = 3600 N
         // Net force = 3600 N - 282.875 N = 3317.125 N
@@ -847,12 +908,9 @@ mod tests {
         );
 
         // The stored acceleration is an output only, it no longer moves load (no lag)
-        simulation_config.initial_car.acceleration = 5.0;
-        let acceleration_with_stored = get_car_acceleration(
-            &simulation_config.car,
-            &simulation_config.initial_car,
-            &simulation_config.environment,
-        );
+        simulation_config.initial_car_state.acceleration = 5.0;
+        let acceleration_with_stored =
+            acceleration(&simulation_config, &simulation_config.initial_car_state);
         assert_eq!(acceleration_with_stored, acceleration_static);
 
         // Nose up (squat) by 1 mrad: s_r = 0 - 1.7 m * (-0.001) = +1.7 mm per rear corner
@@ -860,12 +918,9 @@ mod tests {
         // Traction = 0.9 * 4442 N = 3997.8 N, front + rear stays 8000 N so the losses stay 282.875 N
         // Net force = 3997.8 N - 282.875 N = 3714.925 N
         // Acceleration = 3714.925 N / 815.494393476 kg = 4.555423 m/s^2
-        simulation_config.initial_car.suspension.pitch = -0.001;
-        let acceleration_squat = get_car_acceleration(
-            &simulation_config.car,
-            &simulation_config.initial_car,
-            &simulation_config.environment,
-        );
+        simulation_config.initial_car_state.suspension.pitch = -0.001;
+        let acceleration_squat =
+            acceleration(&simulation_config, &simulation_config.initial_car_state);
         assert!(
             (acceleration_squat - 4.555423).abs() < 1e-3,
             "Calculated value: {}",
@@ -880,11 +935,7 @@ mod tests {
         let mut simulation_state = SimulationState::new(&simulation_config);
         simulation_state.car.gear = 4;
 
-        let acceleration = get_car_acceleration(
-            &simulation_config.car,
-            &simulation_state.car,
-            &simulation_config.environment,
-        );
+        let acceleration = acceleration(&simulation_config, &simulation_state.car);
         let speed = get_car_speed(&simulation_state.car, &simulation_config, acceleration);
 
         // from previous test results we know:
@@ -951,14 +1002,14 @@ mod tests {
             ..SimulationConfig::default()
         };
 
-        let mut dist_a = start_simulation(&mut simulation_config, false, false)
+        let mut dist_a = start_simulation(&mut simulation_config, None, false)
             .car
             .distance;
         let mut prev_diff = f64::MAX;
 
         for _ in 0..5 {
             simulation_config.time_step /= 5.0;
-            let dist_b = start_simulation(&mut simulation_config, false, false)
+            let dist_b = start_simulation(&mut simulation_config, None, false)
                 .car
                 .distance;
 
@@ -1006,14 +1057,14 @@ mod tests {
             corner.droop_rate = 0.0;
         }
 
-        let mut speed_slower = start_simulation(&mut simulation_config, false, false)
+        let mut speed_slower = start_simulation(&mut simulation_config, None, false)
             .car
             .speed;
         let mut speed_faster: f64;
 
         for _ in 0..10 {
             simulation_config.time_step += 0.5;
-            speed_faster = start_simulation(&mut simulation_config, false, false)
+            speed_faster = start_simulation(&mut simulation_config, None, false)
                 .car
                 .speed;
             assert!(speed_faster > speed_slower, "Speed didn't increase!");
@@ -1043,7 +1094,7 @@ mod tests {
         simulation_config.track.braking_zones = vec![(0.0, 1000.0)];
         simulation_config.end_time = 10.0;
 
-        let end_state = start_simulation(&mut simulation_config, false, false);
+        let end_state = start_simulation(&mut simulation_config, None, false);
         assert_eq!(end_state.car.speed, 0.0);
         // Stopped car is no longer decelerating
         assert_eq!(end_state.car.acceleration, 0.0);
@@ -1052,12 +1103,12 @@ mod tests {
     #[test]
     fn test_car_launches_from_standstill() {
         let mut simulation_config = SimulationConfig::default();
-        simulation_config.initial_car.speed = 0.0;
-        simulation_config.initial_car.distance = 0.0;
-        simulation_config.initial_car.gear = 1;
+        simulation_config.initial_car_state.speed = 0.0;
+        simulation_config.initial_car_state.distance = 0.0;
+        simulation_config.initial_car_state.gear = 1;
         simulation_config.end_time = 1.0;
 
-        let end_state = start_simulation(&mut simulation_config, false, false);
+        let end_state = start_simulation(&mut simulation_config, None, false);
 
         // Net force at rest = 3600 N - 280 N = 3320 N > 0 (see forces.rs), so the car must move off.
         // With the old mu_breakaway = 0.7 (5600 N > 3600 N) it stayed at 0 m/s forever.
@@ -1072,9 +1123,9 @@ mod tests {
     #[test]
     fn test_car_never_moves_backwards() {
         let mut simulation_config = SimulationConfig::default();
-        simulation_config.initial_car.speed = 0.0;
-        simulation_config.initial_car.distance = 0.0;
-        simulation_config.initial_car.gear = 1;
+        simulation_config.initial_car_state.speed = 0.0;
+        simulation_config.initial_car_state.distance = 0.0;
+        simulation_config.initial_car_state.gear = 1;
         // Launch, accelerate for 50 m, then brake until stopped
         simulation_config.track.braking_zones = vec![(50.0, 1000.0)];
         let simulation_config = prepared(simulation_config);
@@ -1168,11 +1219,11 @@ mod tests {
                 last_checked_speed = before.speed;
             }
 
-            // Drive this step: 0 during a shift, otherwise the best force capped at the grip
+            // Drive this step: 0 during a shift, otherwise the powertrain force capped at the grip
             let applied_force =
                 applied_powertrain_force(&simulation_config, &before, after.acceleration);
             let best_force =
-                calculate_best_force(powertrain, wheel_radius, after.gear, before.speed);
+                calculate_powertrain_force(powertrain, wheel_radius, after.gear, before.speed);
             let shifting = shifted || before.shift_time_left > 0.0;
             let expected_force = if shifting {
                 0.0
@@ -1254,7 +1305,7 @@ mod tests {
             let after = simulation_state.car;
             assert_eq!(after.gear, 1);
 
-            let best_force = calculate_best_force(powertrain, wheel_radius, 1, before.speed);
+            let best_force = calculate_powertrain_force(powertrain, wheel_radius, 1, before.speed);
             if before.speed < clutch_lock_speed {
                 // Slipping: the locked engine speed is below peak torque speed, the engine is
                 // held at peak torque instead (1e-9 relative: rounding only)
@@ -1292,33 +1343,44 @@ mod tests {
     }
 
     #[test]
-    fn test_no_downshift_while_braking() {
+    fn test_downshift_while_braking() {
         // Brake from 80 m/s in top gear for 215 m (exits at about 42.0 m/s, between the 2 -> 3
-        // and 3 -> 4 upshift speeds 38.37 and 46.38 m/s), then let go: no downshift inside the zone,
-        // after it one gear per shift_time (5 steps) down to the gear the table gives
-        // (docs/12 section 12.7)
+        // and 3 -> 4 upshift speeds 38.37 and 46.38 m/s). The car steps down one gear at a time
+        // inside the zone, at least one shift_time (5 steps) apart, and leaves it in the gear the
+        // table gives, so there is no shift right after the zone (docs/12 section 12.7)
         let mut simulation_config = SimulationConfig::default();
-        simulation_config.initial_car.speed = 80.0;
-        simulation_config.initial_car.distance = 0.0;
-        simulation_config.initial_car.gear = 8;
+        simulation_config.initial_car_state.speed = 80.0;
+        simulation_config.initial_car_state.distance = 0.0;
+        simulation_config.initial_car_state.gear = 8;
         simulation_config.track.braking_zones = vec![(0.0, 215.0)];
         let simulation_config = prepared(simulation_config);
         let mut simulation_state = SimulationState::new(&simulation_config);
 
-        // Inside the zone the gear stays in 8th
-        let mut braking_steps = 0;
+        let mut shift_steps: Vec<usize> = Vec::new();
+        let mut step = 0;
         loop {
             let before = simulation_state.car;
             simulation_step(&mut simulation_state, &simulation_config);
             if !simulation_state.car.braking {
-                // This step left the zone, rewind it so the loop below sees the first shift
+                // This step left the zone, rewind it so the checks below see the exit state
                 simulation_state.car = before;
                 break;
             }
-            assert_eq!(simulation_state.car.gear, 8, "Downshift while braking");
-            braking_steps += 1;
+
+            let gear_after = simulation_state.car.gear;
+            if gear_after != before.gear {
+                assert_eq!(gear_after, before.gear - 1, "Not one gear at a time");
+                shift_steps.push(step);
+            }
+            step += 1;
         }
-        assert!(braking_steps > 0);
+        assert!(!shift_steps.is_empty(), "No downshift while braking");
+        for pair in shift_steps.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= 5,
+                "Downshifts less than one shift_time apart"
+            );
+        }
 
         // The exit speed must be clear of the hysteresis bands, so the table gear is unambiguous
         let exit_speed = simulation_state.car.speed;
@@ -1336,29 +1398,14 @@ mod tests {
             "Exit speed {} m/s too high to test",
             exit_speed
         );
-
-        // Steps down one gear every 5 steps (shift_time 5 ms / time_step 1 ms)
-        let mut shift_steps: Vec<usize> = Vec::new();
-        for step in 0..100 {
-            let gear_before = simulation_state.car.gear;
-            simulation_step(&mut simulation_state, &simulation_config);
-            assert!(!simulation_state.car.braking);
-
-            let gear_after = simulation_state.car.gear;
-            if gear_after != gear_before {
-                assert_eq!(gear_after, gear_before - 1, "Not one gear at a time");
-                shift_steps.push(step);
-            }
-        }
-
         assert_eq!(simulation_state.car.gear, target_gear);
         assert_eq!(shift_steps.len(), (8 - target_gear) as usize);
-        assert_eq!(
-            shift_steps[0], 0,
-            "First downshift not right after the zone"
-        );
-        for pair in shift_steps.windows(2) {
-            assert_eq!(pair[1] - pair[0], 5, "Downshifts not one shift_time apart");
+
+        // Already in the right gear, so no shift right after the zone
+        for _ in 0..100 {
+            simulation_step(&mut simulation_state, &simulation_config);
+            assert!(!simulation_state.car.braking);
+            assert_eq!(simulation_state.car.gear, target_gear);
         }
     }
 
@@ -1503,6 +1550,12 @@ mod tests {
             ("gear ratios increasing", |c| {
                 c.car.powertrain.gear_ratios[2] = 5.0
             }),
+            ("primary_ratio = 0", |c| {
+                c.car.powertrain.primary_ratio = 0.0
+            }),
+            ("primary_ratio NaN", |c| {
+                c.car.powertrain.primary_ratio = f64::NAN
+            }),
             ("final_drive = 0", |c| c.car.powertrain.final_drive = 0.0),
             ("final_drive < 0", |c| c.car.powertrain.final_drive = -3.0),
             ("final_drive infinite", |c| {
@@ -1520,28 +1573,32 @@ mod tests {
             // Wheel radius and starting gear (the shift tables need both)
             ("wheel_radius = 0", |c| c.car.tyre.wheel_radius = 0.0),
             ("wheel_radius NaN", |c| c.car.tyre.wheel_radius = f64::NAN),
-            ("initial gear 0", |c| c.initial_car.gear = 0),
-            ("initial gear above top gear", |c| c.initial_car.gear = 9),
+            ("initial gear 0", |c| c.initial_car_state.gear = 0),
+            ("initial gear above top gear", |c| {
+                c.initial_car_state.gear = 9
+            }),
             // Other starting conditions
-            ("initial speed < 0", |c| c.initial_car.speed = -1.0),
-            ("initial speed NaN", |c| c.initial_car.speed = f64::NAN),
+            ("initial speed < 0", |c| c.initial_car_state.speed = -1.0),
+            ("initial speed NaN", |c| {
+                c.initial_car_state.speed = f64::NAN
+            }),
             ("initial distance infinite", |c| {
-                c.initial_car.distance = f64::INFINITY
+                c.initial_car_state.distance = f64::INFINITY
             }),
             ("initial shift_time_left < 0", |c| {
-                c.initial_car.shift_time_left = -0.001
+                c.initial_car_state.shift_time_left = -0.001
             }),
             ("initial heave NaN", |c| {
-                c.initial_car.suspension.heave = f64::NAN
+                c.initial_car_state.suspension.heave = f64::NAN
             }),
             ("initial heave_velocity infinite", |c| {
-                c.initial_car.suspension.heave_velocity = f64::INFINITY
+                c.initial_car_state.suspension.heave_velocity = f64::INFINITY
             }),
             ("initial pitch NaN", |c| {
-                c.initial_car.suspension.pitch = f64::NAN
+                c.initial_car_state.suspension.pitch = f64::NAN
             }),
             ("initial pitch_rate infinite", |c| {
-                c.initial_car.suspension.pitch_rate = f64::NEG_INFINITY
+                c.initial_car_state.suspension.pitch_rate = f64::NEG_INFINITY
             }),
             // Braking zones
             ("braking zone end < start", |c| {
@@ -1671,38 +1728,39 @@ mod tests {
     fn test_prepare_fills_initial_car_state() {
         let mut simulation_config = SimulationConfig::default();
         simulation_config.track.braking_zones = vec![(100.0, 200.0), (300.0, 400.0)];
-        simulation_config.initial_car.distance = 250.0;
-        simulation_config.initial_car.speed = 20.0;
-        simulation_config.initial_car.gear = 3;
+        simulation_config.initial_car_state.distance = 250.0;
+        simulation_config.initial_car_state.speed = 20.0;
+        simulation_config.initial_car_state.gear = 3;
 
         simulation_config.prepare().unwrap();
-        let initial_car = simulation_config.initial_car;
+        let initial_car_state = simulation_config.initial_car_state;
 
         // Past the first zone, before the second: the second zone is next, not braking
-        assert_eq!(initial_car.active_braking_zone, 1);
-        assert!(!initial_car.braking);
+        assert_eq!(initial_car_state.active_braking_zone, 1);
+        assert!(!initial_car_state.braking);
         // Locked engine speed in 3rd gear (docs/12, equation 12.2), not the default 0.5 Hz
         assert_eq!(
-            initial_car.revs_hz,
-            calculate_transmission_input_revs(&simulation_config.car.powertrain, 0.36, 3, 20.0)
+            initial_car_state.revs_hz,
+            calculate_engine_revs_from_wheel_speed(
+                &simulation_config.car.powertrain,
+                0.36,
+                3,
+                20.0
+            )
         );
         // a_x from the starting state, the same calculation the first step makes
         assert_eq!(
-            initial_car.acceleration,
-            get_car_acceleration(
-                &simulation_config.car,
-                &initial_car,
-                &simulation_config.environment
-            )
+            initial_car_state.acceleration,
+            acceleration(&simulation_config, &initial_car_state)
         );
-        assert!(initial_car.acceleration > 0.0);
+        assert!(initial_car_state.acceleration > 0.0);
 
         // Preparing again gives the same config
         let mut prepared_twice = prepared(SimulationConfig {
             track: Track {
                 braking_zones: vec![(100.0, 200.0), (300.0, 400.0)],
             },
-            initial_car: CarState {
+            initial_car_state: CarState {
                 distance: 250.0,
                 speed: 20.0,
                 gear: 3,
@@ -1715,11 +1773,11 @@ mod tests {
 
         // Inside a zone: braking
         let mut simulation_config = SimulationConfig::default();
-        simulation_config.initial_car.distance = 950.0;
+        simulation_config.initial_car_state.distance = 950.0;
         simulation_config.prepare().unwrap();
-        assert_eq!(simulation_config.initial_car.active_braking_zone, 0);
-        assert!(simulation_config.initial_car.braking);
-        assert!(simulation_config.initial_car.acceleration < 0.0);
+        assert_eq!(simulation_config.initial_car_state.active_braking_zone, 0);
+        assert!(simulation_config.initial_car_state.braking);
+        assert!(simulation_config.initial_car_state.acceleration < 0.0);
     }
 
     #[test]
@@ -1805,7 +1863,7 @@ mod tests {
             g_acceleration,
         ));
         // Nose down and load moved to the front. The total stays m * g = 8000 N: the symmetric
-        // car keeps heave at exactly 0, so F_f = -F_r (1e-6 N covers rounding)
+        // car keeps heave at exactly 0, so dF_f = -dF_r (1e-6 N covers rounding)
         assert!(suspension.pitch > 0.0);
         assert!(loads.front > 4000.0 + 500.0, "{:?}", loads);
         assert!((loads.total() - 8000.0).abs() < 1e-6, "{:?}", loads);
@@ -1843,7 +1901,7 @@ mod tests {
     fn test_acceleration_squats() {
         // Accelerating from 10 m/s in 1st gear: load moves to the rear, nose up
         let mut simulation_config = SimulationConfig::default();
-        simulation_config.initial_car.gear = 1;
+        simulation_config.initial_car_state.gear = 1;
         let simulation_config = prepared(simulation_config);
         let mut simulation_state = SimulationState::new(&simulation_config);
         assert_eq!(simulation_state.car.suspension, SuspensionState::default());
@@ -1867,7 +1925,7 @@ mod tests {
         let mut simulation_config = SimulationConfig::default();
         simulation_config.car.geometry.wheelbase = 0.0;
 
-        start_simulation(&mut simulation_config, false, false);
+        start_simulation(&mut simulation_config, None, false);
     }
 
     #[test]

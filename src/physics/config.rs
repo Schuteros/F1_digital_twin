@@ -6,12 +6,13 @@
 
 use crate::physics::aero::Aero;
 use crate::physics::braking::Brakes;
-use crate::physics::car::{Car, ChassisGeometry, Mass};
-use crate::physics::chassis::Suspension;
+use crate::physics::car::{Car, Mass};
+use crate::physics::chassis::ChassisGeometry;
 use crate::physics::environment::Environment;
 use crate::physics::powertrain::Powertrain;
 use crate::physics::simulation::SimulationConfig;
 use crate::physics::states::CarState;
+use crate::physics::suspension::{StaticCarValues, Suspension};
 use crate::physics::track::Track;
 use crate::physics::tyres::Tyre;
 use serde::Deserialize;
@@ -24,14 +25,6 @@ const FORMAT_VERSION: i64 = 1;
 
 /// Header row a track CSV must start with
 const TRACK_HEADER: [&str; 2] = ["start_m", "end_m"];
-
-/// Just the version key of a TOML data file. The other keys are ignored here, they are
-/// checked when the whole file is read.
-#[derive(Deserialize)]
-struct FormatVersion {
-    /// Data file format version, must be `FORMAT_VERSION`
-    format_version: i64,
-}
 
 /// Run file: which car, tyres, track and environment to simulate, and the time settings
 #[derive(Deserialize)]
@@ -85,6 +78,14 @@ struct CarFile {
     suspension: Suspension,
 }
 
+/// Just the version key of a TOML data file. The other keys are ignored here, they are
+/// checked when the whole file is read.
+#[derive(Deserialize)]
+struct FormatVersion {
+    /// Data file format version, must be `FORMAT_VERSION`
+    format_version: i64,
+}
+
 /// Loads a run file and every file it points to, then runs `SimulationConfig::prepare`:
 /// it validates the config and calculates everything that follows from it (the shift tables
 /// and the calculated part of the starting car state). The returned config is always valid
@@ -108,7 +109,7 @@ pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
     let track = load_track(&run_folder.join(&run.track))?;
 
     let mut simulation_config = SimulationConfig {
-        initial_car: run.initial_state,
+        initial_car_state: run.initial_state,
         car: Car {
             mass: car.mass,
             powertrain: car.powertrain,
@@ -123,6 +124,8 @@ pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
         start_time: run.start_time,
         end_time: run.end_time,
         time_step: run.time_step,
+        // Filled by prepare below
+        static_values: StaticCarValues::default(),
     };
 
     simulation_config
@@ -130,34 +133,6 @@ pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
         .map_err(|message| format!("{}: invalid config: {}", path.display(), message))?;
 
     Ok(simulation_config)
-}
-
-/// Folder a data file is in, which its relative paths start from
-fn folder_of(path: &Path) -> &Path {
-    path.parent().unwrap_or(Path::new(""))
-}
-
-/// Reads a whole data file as text
-fn read_file(path: &Path) -> Result<String, String> {
-    fs::read_to_string(path)
-        .map_err(|error| format!("{}: cannot read file: {}", path.display(), error))
-}
-
-/// Checks that a TOML data file has `format_version = FORMAT_VERSION`
-fn check_format_version(path: &Path, text: &str) -> Result<(), String> {
-    let version: FormatVersion =
-        toml::from_str(text).map_err(|error| format!("{}: {}", path.display(), error))?;
-
-    if version.format_version != FORMAT_VERSION {
-        return Err(format!(
-            "{}: format_version must be {}, got {}",
-            path.display(),
-            FORMAT_VERSION,
-            version.format_version
-        ));
-    }
-
-    Ok(())
 }
 
 /// Reads a TOML data file: checks the format version first, then reads every key
@@ -182,6 +157,34 @@ fn load_flat_toml<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
     table.remove("format_version");
 
     T::deserialize(table).map_err(|error| format!("{}: {}", path.display(), error))
+}
+
+/// Checks that a TOML data file has `format_version = FORMAT_VERSION`
+fn check_format_version(path: &Path, text: &str) -> Result<(), String> {
+    let version: FormatVersion =
+        toml::from_str(text).map_err(|error| format!("{}: {}", path.display(), error))?;
+
+    if version.format_version != FORMAT_VERSION {
+        return Err(format!(
+            "{}: format_version must be {}, got {}",
+            path.display(),
+            FORMAT_VERSION,
+            version.format_version
+        ));
+    }
+
+    Ok(())
+}
+
+/// Reads a whole data file as text
+fn read_file(path: &Path) -> Result<String, String> {
+    fs::read_to_string(path)
+        .map_err(|error| format!("{}: cannot read file: {}", path.display(), error))
+}
+
+/// Folder a data file is in, which its relative paths start from
+fn folder_of(path: &Path) -> &Path {
+    path.parent().unwrap_or(Path::new(""))
 }
 
 /// Reads a track CSV: a `start_m,end_m` header, then one braking zone per row in meters, m.
@@ -348,17 +351,23 @@ mod tests {
 
         // The starting conditions in the run file are exactly CarState::default()
         let default_car_state = CarState::default();
-        assert_eq!(loaded.initial_car.speed, default_car_state.speed);
-        assert_eq!(loaded.initial_car.distance, default_car_state.distance);
-        assert_eq!(loaded.initial_car.gear, default_car_state.gear);
+        assert_eq!(loaded.initial_car_state.speed, default_car_state.speed);
         assert_eq!(
-            loaded.initial_car.shift_time_left,
+            loaded.initial_car_state.distance,
+            default_car_state.distance
+        );
+        assert_eq!(loaded.initial_car_state.gear, default_car_state.gear);
+        assert_eq!(
+            loaded.initial_car_state.shift_time_left,
             default_car_state.shift_time_left
         );
-        assert_eq!(loaded.initial_car.suspension, default_car_state.suspension);
+        assert_eq!(
+            loaded.initial_car_state.suspension,
+            default_car_state.suspension
+        );
 
         // Every field, exact float equality: the files must hold the exact Default values
-        assert_eq!(loaded.initial_car, expected.initial_car);
+        assert_eq!(loaded.initial_car_state, expected.initial_car_state);
         assert_eq!(loaded.car.mass, expected.car.mass);
         assert_eq!(loaded.car.geometry, expected.car.geometry);
         assert_eq!(loaded.car.aero, expected.car.aero);
@@ -383,8 +392,8 @@ mod tests {
         loaded.end_time = 30.0;
         expected.end_time = 30.0;
 
-        let loaded_state = start_simulation(&mut loaded, false, false);
-        let expected_state = start_simulation(&mut expected, false, false);
+        let loaded_state = start_simulation(&mut loaded, None, false);
+        let expected_state = start_simulation(&mut expected, None, false);
 
         assert_eq!(loaded_state, expected_state);
         // The shift tables computed from the loaded data are the same too
@@ -448,30 +457,30 @@ mod tests {
         data.replace(run, "pitch_rad = 0.0", "pitch_rad = 0.001");
 
         let simulation_config = load_run(&data.run()).unwrap();
-        let initial_car = simulation_config.initial_car;
+        let initial_car_state = simulation_config.initial_car_state;
 
         // Starting conditions come from the file
-        assert_eq!(initial_car.speed, 30.0);
-        assert_eq!(initial_car.distance, 950.0);
-        assert_eq!(initial_car.gear, 2);
-        assert_eq!(initial_car.shift_time_left, 0.003);
-        assert_eq!(initial_car.suspension.pitch, 0.001);
-        assert_eq!(initial_car.suspension.heave, 0.0);
+        assert_eq!(initial_car_state.speed, 30.0);
+        assert_eq!(initial_car_state.distance, 950.0);
+        assert_eq!(initial_car_state.gear, 2);
+        assert_eq!(initial_car_state.shift_time_left, 0.003);
+        assert_eq!(initial_car_state.suspension.pitch, 0.001);
+        assert_eq!(initial_car_state.suspension.heave, 0.0);
 
         // The rest is calculated from them, not left at the defaults
-        assert_eq!(initial_car.active_braking_zone, 0);
-        assert!(initial_car.braking);
+        assert_eq!(initial_car_state.active_braking_zone, 0);
+        assert!(initial_car_state.braking);
         // n = v * i_2 * i_f / (2 * pi * r) = 30 * 4.02 * 3.0 / (2 * pi * 0.36) = 159.95 Hz
         assert!(
-            (initial_car.revs_hz - 159.9507).abs() < 1e-3,
+            (initial_car_state.revs_hz - 159.9507).abs() < 1e-3,
             "{}",
-            initial_car.revs_hz
+            initial_car_state.revs_hz
         );
         // Braking, so the car decelerates
         assert!(
-            initial_car.acceleration < 0.0,
+            initial_car_state.acceleration < 0.0,
             "{}",
-            initial_car.acceleration
+            initial_car_state.acceleration
         );
     }
 
