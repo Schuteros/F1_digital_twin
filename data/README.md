@@ -12,8 +12,10 @@ data/
   cars/baseline.toml           mass, geometry, aero, brakes, powertrain, suspension
   tyres/baseline.toml          friction and wheel radius
   tracks/straight_1000m.csv    braking zones
+  tracks/oval_244m.csv         XY points of a test oval (docs/15)
   environments/standard.toml   air density and gravity
   runs/baseline.toml           picks the files above, time settings and start state
+  runs/oval_3_laps.toml        three laps of the oval
 ```
 
 The baseline files hold exactly the values of the Rust `Default` impls, so the baseline run
@@ -43,15 +45,27 @@ gives the same results as the code defaults.
 | `track` | path | Track CSV file |
 | `environment` | path | Environment file |
 | `start_time_s` | s | Start time of the simulation |
-| `end_time_s` | s | End time of the simulation (it also stops when the car has braked to a stop) |
+| `end_condition` | | When the run ends, one of the two forms below (it also stops when the car has braked to a stop) |
+| `curvature_smoothing_window_m` | m | Optional. Length the track curvature is averaged over, >= 0 (docs/15 section 15.5). `0.0` or missing = no smoothing. Only used by a track with XY points |
 | `time_step_s` | s | Time step. Must be > 0 and satisfy the suspension stability limit omega_max * time_step < 2 (docs/11 section 11.8) |
+
+`end_condition` (docs/15 section 15.8):
+
+```toml
+# stop at a fixed time, > start_time_s
+end_condition = { time_s = 30.0 }
+
+# or stop after a number of completed laps (>= 1), at max_time_s at the latest.
+# Needs a track with XY points.
+end_condition = { laps = 3, max_time_s = 600.0 }
+```
 
 `[initial_state]`: the starting conditions of the car at `start_time_s`.
 
 | Key | Unit | Meaning |
 |---|---|---|
 | `speed_m_per_s` | m/s | Speed, >= 0 |
-| `distance_m` | m | Distance along the track |
+| `distance_m` | m | Distance along the track. On a track with XY points it is measured from the start/finish line (point 0) and must be >= 0. `0.0` starts on the line, a larger value gives a partial first lap |
 | `gear` | | Gear, 1 is first gear. Must exist in `gear_ratios` |
 | `shift_time_left_s` | s | Time left of a gear shift in progress, >= 0. `0.0` = not shifting |
 
@@ -67,7 +81,7 @@ gives the same results as the code defaults.
 The rest of the car state is not written in the file, because it follows from the values above
 and the car, track and environment. It is calculated before the run starts
 (`SimulationConfig::prepare`): the active braking zone and whether the car is braking (from
-`distance_m` and the track), the locked engine speed (from speed and gear, docs/12 equation 12.2)
+`distance_m` and the track), the lap, position and curvature on a track with XY points, the locked engine speed (from speed and gear, docs/12 equation 12.2)
 and the acceleration. Writing one of them (e.g. `revs_hz`) is an unknown key error.
 
 ## Car file (`cars/*.toml`)
@@ -174,8 +188,11 @@ calculated from the torque curve, gearing and wheel radius before the simulation
 
 ## Track file (`tracks/*.csv`)
 
-A header row `start_m,end_m`, then one braking zone per row. Lines starting with `#` are
-comments. A bad row is an error that names the file and the line number.
+The header row decides what the rows are: braking zones (`start_m,end_m`) or the XY points of
+the line the car drives (`x_m,y_m`). Lines starting with `#` are comments. A bad row is an error
+that names the file and the line number.
+
+### Braking zones
 
 | Column | Unit | Meaning |
 |---|---|---|
@@ -184,3 +201,20 @@ comments. A bad row is an error that names the file and the line number.
 
 The car brakes at full threshold braking inside a zone and accelerates everywhere else.
 Zones should be in driving order. With no rows, the car never brakes.
+
+### XY points (docs/15)
+
+| Column | Unit | Meaning |
+|---|---|---|
+| `x_m` | m | Position of the point |
+| `y_m` | m | Position of the point |
+
+One point per row, in driving order. The track is a closed loop: after the last point the car
+drives straight back to the first one, so do not repeat the first point at the end. The first
+point is the start/finish line. At least 3 points, and two points in a row must not be at the
+same place. Keep the spacing fairly even (about 1 m works well).
+
+From the points the distance to each point, the lap length and the curvature (positive for a left
+turn) are calculated when the file is loaded. The car gets a position, a lap counter and lap
+times. A track with XY points has no braking zones and the car does not slow down for corners
+yet (docs/15 section 15.12), so it drives flat out.

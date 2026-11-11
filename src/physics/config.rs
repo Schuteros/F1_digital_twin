@@ -10,7 +10,7 @@ use crate::physics::car::{Car, Mass};
 use crate::physics::chassis::ChassisGeometry;
 use crate::physics::environment::Environment;
 use crate::physics::powertrain::Powertrain;
-use crate::physics::simulation::SimulationConfig;
+use crate::physics::simulation::{EndCondition, SimulationConfig};
 use crate::physics::states::CarState;
 use crate::physics::suspension::{StaticCarValues, Suspension};
 use crate::physics::track::Track;
@@ -23,8 +23,11 @@ use std::path::{Path, PathBuf};
 /// The only data file format version this build can read
 const FORMAT_VERSION: i64 = 1;
 
-/// Header row a track CSV must start with
+/// Header row of a track CSV with braking zones
 const TRACK_HEADER: [&str; 2] = ["start_m", "end_m"];
+
+/// Header row of a track CSV with the XY points of the line (docs/15 section 15.2)
+const TRACK_POINTS_HEADER: [&str; 2] = ["x_m", "y_m"];
 
 /// Run file: which car, tyres, track and environment to simulate, and the time settings
 #[derive(Deserialize)]
@@ -44,9 +47,12 @@ struct RunFile {
     /// Start time of the simulation in seconds, s
     #[serde(rename = "start_time_s")]
     start_time: f64,
-    /// End time of the simulation in seconds, s
-    #[serde(rename = "end_time_s")]
-    end_time: f64,
+    /// When the run ends: `{ time_s }` or `{ laps, max_time_s }` (docs/15 section 15.8)
+    end_condition: EndCondition,
+    /// Length the track curvature is averaged over in meters, m, 0 = no smoothing (docs/15
+    /// section 15.5). Only used by a track with XY points. If missing, 0 is used.
+    #[serde(rename = "curvature_smoothing_window_m")]
+    curvature_smoothing_window: Option<f64>,
     /// Time step of the simulation in seconds, s
     #[serde(rename = "time_step_s")]
     time_step: f64,
@@ -106,7 +112,10 @@ pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
     let tyre: Tyre = load_flat_toml(&tyre_path)?;
 
     let environment: Environment = load_flat_toml(&run_folder.join(&run.environment))?;
-    let track = load_track(&run_folder.join(&run.track))?;
+    let track = load_track(
+        &run_folder.join(&run.track),
+        run.curvature_smoothing_window.unwrap_or(0.0),
+    )?;
 
     let mut simulation_config = SimulationConfig {
         initial_car_state: run.initial_state,
@@ -122,7 +131,7 @@ pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
         environment,
         track,
         start_time: run.start_time,
-        end_time: run.end_time,
+        end_condition: run.end_condition,
         time_step: run.time_step,
         // Filled by prepare below
         static_values: StaticCarValues::default(),
@@ -187,9 +196,13 @@ fn folder_of(path: &Path) -> &Path {
     path.parent().unwrap_or(Path::new(""))
 }
 
-/// Reads a track CSV: a `start_m,end_m` header, then one braking zone per row in meters, m.
+/// Reads a track CSV. The header row decides what the rows are:
+/// * `start_m,end_m`: one braking zone per row in meters, m,
+/// * `x_m,y_m`: one point of the line the car drives per row in meters, m (docs/15). The
+///   curvature is smoothed over `curvature_smoothing_window` meters.
+///
 /// Lines starting with `#` are comments.
-fn load_track(path: &Path) -> Result<Track, String> {
+fn load_track(path: &Path, curvature_smoothing_window: f64) -> Result<Track, String> {
     let text = read_file(path)?;
     let mut reader = csv::ReaderBuilder::new()
         .comment(Some(b'#'))
@@ -199,27 +212,43 @@ fn load_track(path: &Path) -> Result<Track, String> {
     let header = reader
         .headers()
         .map_err(|error| format!("{}: {}", path.display(), error))?;
-    if header.iter().ne(TRACK_HEADER) {
+    let columns = if header.iter().eq(TRACK_HEADER) {
+        TRACK_HEADER
+    } else if header.iter().eq(TRACK_POINTS_HEADER) {
+        TRACK_POINTS_HEADER
+    } else {
         return Err(format!(
-            "{}: line {}: header must be `{}`, got `{}`",
+            "{}: line {}: header must be `{}` or `{}`, got `{}`",
             path.display(),
             header.position().map_or(1, |position| position.line()),
             TRACK_HEADER.join(","),
+            TRACK_POINTS_HEADER.join(","),
             header.iter().collect::<Vec<_>>().join(",")
         ));
-    }
+    };
 
-    let mut braking_zones = Vec::new();
+    let mut rows = Vec::new();
     for record in reader.records() {
         let record = record.map_err(|error| csv_error_message(path, &error))?;
         let line = record.position().map_or(0, |position| position.line());
 
-        let start = parse_csv_number(path, line, TRACK_HEADER[0], &record[0])?;
-        let end = parse_csv_number(path, line, TRACK_HEADER[1], &record[1])?;
-        braking_zones.push((start, end));
+        let first = parse_csv_number(path, line, columns[0], &record[0])?;
+        let second = parse_csv_number(path, line, columns[1], &record[1])?;
+        rows.push((first, second));
     }
 
-    Ok(Track { braking_zones })
+    if columns == TRACK_POINTS_HEADER {
+        Track::from_points(rows, curvature_smoothing_window)
+            .map_err(|message| format!("{}: {}", path.display(), message))
+    } else {
+        Ok(Track {
+            braking_zones: rows,
+            points: Vec::new(),
+            distances: Vec::new(),
+            curvatures: Vec::new(),
+            lap_length: 0.0,
+        })
+    }
 }
 
 /// Describes a csv error in the same `path: line N: ...` form as the other track errors
@@ -273,7 +302,7 @@ mod tests {
     /// (start_simulation always prepared it before the first step)
     fn expected_baseline() -> SimulationConfig {
         let mut simulation_config = SimulationConfig {
-            end_time: 100000.0,
+            end_condition: EndCondition::Time { end_time: 100000.0 },
             ..SimulationConfig::default()
         };
         simulation_config.prepare().unwrap();
@@ -378,7 +407,7 @@ mod tests {
         assert_eq!(loaded.environment, expected.environment);
         assert_eq!(loaded.track, expected.track);
         assert_eq!(loaded.start_time, expected.start_time);
-        assert_eq!(loaded.end_time, expected.end_time);
+        assert_eq!(loaded.end_condition, expected.end_condition);
         assert_eq!(loaded.time_step, expected.time_step);
         // And the whole struct, so a field added later can't be missed
         assert_eq!(loaded, expected);
@@ -389,8 +418,8 @@ mod tests {
         let mut loaded = load_run(&baseline_run()).unwrap();
         let mut expected = expected_baseline();
         // Long enough to pass the braking zone at 900 m to 1000 m and shift up several times
-        loaded.end_time = 30.0;
-        expected.end_time = 30.0;
+        loaded.end_condition = EndCondition::Time { end_time: 30.0 };
+        expected.end_condition = EndCondition::Time { end_time: 30.0 };
 
         let loaded_state = start_simulation(&mut loaded, None, false);
         let expected_state = start_simulation(&mut expected, None, false);
@@ -535,9 +564,9 @@ mod tests {
         assert!(message.contains("../tyres/baseline.toml"), "{}", message);
 
         let data = TempData::new("unknown_key_run");
-        data.replace("runs/baseline.toml", "end_time_s", "end_time");
+        data.replace("runs/baseline.toml", "time_step_s", "time_step");
         let message = load_run(&data.run()).unwrap_err();
-        assert!(message.contains("unknown field `end_time`"), "{}", message);
+        assert!(message.contains("unknown field `time_step`"), "{}", message);
     }
 
     #[test]
@@ -757,5 +786,127 @@ mod tests {
             "{}",
             message
         );
+    }
+
+    #[test]
+    fn test_oval_run_loads() {
+        // data/runs/oval_3_laps.toml: XY track, run ends on laps
+        let run = data_folder().join("runs").join("oval_3_laps.toml");
+        let loaded = load_run(&run).unwrap();
+
+        assert_eq!(
+            loaded.end_condition,
+            EndCondition::Laps {
+                laps: 3,
+                max_time: 600.0
+            }
+        );
+        assert!(loaded.track.braking_zones.is_empty());
+        assert_eq!(loaded.track.points.len(), 244);
+        // docs/15 section 15.9: 2 * 75 + 2 * pi * 15 = 244.248 m, a little less with straight segments
+        assert!((loaded.track.lap_length - 244.248).abs() < 0.02);
+        assert_eq!(loaded.track.curvatures[37], 0.0);
+        assert!((loaded.track.curvatures[98] * 15.0 - 1.0).abs() < 1e-3);
+        assert_eq!(loaded.initial_car_state.distance, 0.0);
+    }
+
+    #[test]
+    fn test_end_condition_parses() {
+        let time = "end_condition = { time_s = 100000.0 }";
+
+        // Laps need an XY track
+        let data = TempData::new("end_condition_laps_no_line");
+        data.replace(
+            "runs/baseline.toml",
+            time,
+            "end_condition = { laps = 2, max_time_s = 60.0 }",
+        );
+        let message = load_run(&data.run()).unwrap_err();
+        assert!(
+            message.contains("needs a track with XY points"),
+            "{}",
+            message
+        );
+
+        // Neither one nor the other
+        for (name, bad) in [
+            (
+                "both",
+                "end_condition = { time_s = 30.0, laps = 2, max_time_s = 60.0 }",
+            ),
+            ("laps_only", "end_condition = { laps = 2 }"),
+            ("empty", "end_condition = { }"),
+        ] {
+            let data = TempData::new(&format!("end_condition_{}", name));
+            data.replace("runs/baseline.toml", time, bad);
+            let message = load_run(&data.run()).unwrap_err();
+            assert!(
+                message.contains(
+                    "must be either { time_s = ... } or { laps = ..., max_time_s = ... }"
+                ),
+                "{}",
+                message
+            );
+        }
+
+        // Unknown key, and the old key
+        let data = TempData::new("end_condition_unknown");
+        data.replace(
+            "runs/baseline.toml",
+            time,
+            "end_condition = { time = 30.0 }",
+        );
+        let message = load_run(&data.run()).unwrap_err();
+        assert!(message.contains("unknown field `time`"), "{}", message);
+
+        let data = TempData::new("end_condition_old_key");
+        data.replace("runs/baseline.toml", time, "end_time_s = 30.0");
+        let message = load_run(&data.run()).unwrap_err();
+        assert!(
+            message.contains("unknown field `end_time_s`"),
+            "{}",
+            message
+        );
+    }
+
+    #[test]
+    fn test_points_track_loads_from_run() {
+        let track = "tracks/straight_1000m.csv";
+        let square = "x_m,y_m\n0.0,0.0\n10.0,0.0\n10.0,10.0\n0.0,10.0\n";
+
+        let data = TempData::new("points_track");
+        data.write(track, square);
+        let loaded = load_run(&data.run()).unwrap();
+        assert_eq!(loaded.track.lap_length, 40.0);
+        assert!(loaded.track.braking_zones.is_empty());
+        // Started 100 m in: on lap 3 (k = 2), 20 m after the line, at point 2
+        assert_eq!(loaded.initial_car_state.lap, 2);
+        assert_eq!(
+            (loaded.initial_car_state.x, loaded.initial_car_state.y),
+            (10.0, 10.0)
+        );
+
+        // Smoothing window from the run file: 25 m covers 3 of the 4 corners
+        let data = TempData::new("points_track_window");
+        data.write(track, square);
+        data.replace(
+            "runs/baseline.toml",
+            "time_step_s = 0.001",
+            "time_step_s = 0.001\ncurvature_smoothing_window_m = -1.0",
+        );
+        let message = load_run(&data.run()).unwrap_err();
+        assert!(message.contains("straight_1000m.csv"), "{}", message);
+        assert!(
+            message.contains("curvature_smoothing_window must be >= 0 m"),
+            "{}",
+            message
+        );
+
+        // Too few points names the file
+        let data = TempData::new("points_track_two_points");
+        data.write(track, "x_m,y_m\n0.0,0.0\n10.0,0.0\n");
+        let message = load_run(&data.run()).unwrap_err();
+        assert!(message.contains("straight_1000m.csv"), "{}", message);
+        assert!(message.contains("at least 3 points"), "{}", message);
     }
 }

@@ -6,7 +6,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 /// Column names of the log, in the order `write_row` writes them
-const HEADER: [&str; 13] = [
+const HEADER: [&str; 17] = [
     "time_s",
     "distance_m",
     "speed_m_per_s",
@@ -20,6 +20,10 @@ const HEADER: [&str; 13] = [
     "heave_velocity_m_per_s",
     "pitch_rad",
     "pitch_rate_rad_per_s",
+    "lap",
+    "x_m",
+    "y_m",
+    "curvature_1_per_m",
 ];
 
 /// CSV log of the car state: one row at the start, then one every `every_steps` steps, and
@@ -86,7 +90,7 @@ impl CarStateLog {
         let car = &state.car;
         let suspension = &car.suspension;
         let row = format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             state.time,
             car.distance,
             car.speed,
@@ -100,6 +104,10 @@ impl CarStateLog {
             suspension.heave_velocity,
             suspension.pitch,
             suspension.pitch_rate,
+            car.lap,
+            car.x,
+            car.y,
+            car.curvature,
         );
         self.write_line(&row);
     }
@@ -123,7 +131,7 @@ impl CarStateLog {
 #[cfg(test)]
 mod tests {
     use crate::physics::car_state_log::{CarStateLog, HEADER};
-    use crate::physics::simulation::{SimulationConfig, start_simulation};
+    use crate::physics::simulation::{EndCondition, SimulationConfig, start_simulation};
     use std::fs;
 
     #[test]
@@ -131,7 +139,7 @@ mod tests {
         // 10 steps of 1 ms, a row every 4 steps: steps 0, 4, 8 and the last step 10
         let path = std::env::temp_dir().join(format!("car_state_log_{}.csv", std::process::id()));
         let mut simulation_config = SimulationConfig {
-            end_time: 0.01,
+            end_condition: EndCondition::Time { end_time: 0.01 },
             ..SimulationConfig::default()
         };
 

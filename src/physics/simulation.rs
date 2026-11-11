@@ -17,14 +17,77 @@ use crate::physics::suspension::{
     calculate_natural_frequencies, calculate_static_car_values, sum_axle_loads,
     update_suspension_positions, update_suspension_velocities,
 };
-use crate::physics::track::{Track, find_active_braking_zone, is_braking_zone};
+use crate::physics::track::{
+    Track, calculate_crossing_time, find_active_braking_zone, find_track_position, is_braking_zone,
+};
 use crate::physics::tyres::{AxleGrip, Tyre, calculate_axle_grip};
+use serde::Deserialize;
 
 /// Allowed difference between mass.front + mass.rear and mass.total in kilograms, kg
 const MASS_SUM_TOLERANCE: f64 = 1e-6;
 
 /// Semi-implicit Euler is only stable for omega_max * time_step below this (docs/11 section 11.8)
 const STABILITY_LIMIT: f64 = 2.0;
+
+/// When the run ends (docs/15 section 15.8). The run also ends when the car has braked to a stop.
+///
+/// In a run file: `end_condition = { time_s = 30.0 }` or
+/// `end_condition = { laps = 3, max_time_s = 600.0 }`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(try_from = "EndConditionFile")]
+pub enum EndCondition {
+    /// Stop when the simulation time reaches `end_time`
+    Time {
+        /// End time of the simulation in seconds, s, > start_time
+        end_time: f64,
+    },
+    /// Stop when `laps` laps are completed, or at `max_time`, whichever comes first.
+    /// Needs a track with XY points.
+    Laps {
+        /// Number of laps to complete, >= 1. A lap is completed every time the car crosses the
+        /// start/finish line.
+        laps: u32,
+        /// Latest end time of the simulation in seconds, s, > start_time. It stops a run in
+        /// which the car never completes the laps.
+        max_time: f64,
+    },
+}
+
+impl EndCondition {
+    /// Latest time the run can end in seconds, s
+    pub(crate) fn latest_end_time(&self) -> f64 {
+        match *self {
+            EndCondition::Time { end_time } => end_time,
+            EndCondition::Laps { max_time, .. } => max_time,
+        }
+    }
+}
+
+/// `end_condition` table of a run file, before it is checked to be one of the two conditions
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EndConditionFile {
+    /// End time in seconds, s (`EndCondition::Time`)
+    time_s: Option<f64>,
+    /// Number of laps (`EndCondition::Laps`)
+    laps: Option<u32>,
+    /// Latest end time in seconds, s (`EndCondition::Laps`)
+    max_time_s: Option<f64>,
+}
+
+impl TryFrom<EndConditionFile> for EndCondition {
+    type Error = String;
+
+    fn try_from(file: EndConditionFile) -> Result<Self, String> {
+        match (file.time_s, file.laps, file.max_time_s) {
+            (Some(end_time), None, None) => Ok(EndCondition::Time { end_time }),
+            (None, Some(laps), Some(max_time)) => Ok(EndCondition::Laps { laps, max_time }),
+            _ => Err(
+                "must be either { time_s = ... } or { laps = ..., max_time_s = ... }".to_string(),
+            ),
+        }
+    }
+}
 
 /// Holds all the initial values to start simulation
 #[derive(Debug, PartialEq)]
@@ -44,14 +107,11 @@ pub struct SimulationConfig {
     /// Start time of the simulation in seconds, s
     /// **Range:**
     /// * min: f64::MIN
-    /// * max: <end_time
+    /// * max: <end time of `end_condition`
     pub start_time: f64, // Seconds (s)
 
-    /// End time of the simulation in seconds, s
-    /// **Range:**
-    /// * min: >start_time
-    /// * max: f64::MAX
-    pub end_time: f64, // Seconds (s)
+    /// When the run ends: at a time or after a number of laps (docs/15 section 15.8)
+    pub end_condition: EndCondition,
 
     /// Time step of the simulation in seconds, s
     /// * Smaller value increases accuracy of the simulation, but increases computation time linearly
@@ -71,7 +131,7 @@ impl Default for SimulationConfig {
             environment: Environment::default(),
             track: Track::default(),
             start_time: 0.0,
-            end_time: 1.0,
+            end_condition: EndCondition::Time { end_time: 1.0 },
             time_step: 0.001,
             static_values: StaticCarValues::default(),
         }
@@ -83,6 +143,12 @@ impl Default for SimulationConfig {
 pub(crate) struct SimulationState {
     pub(crate) car: CarState,
     pub(crate) time: f64, // Seconds (s)
+    /// Time of every lap completed in this run in seconds, s (docs/15, equation 15.10).
+    /// The first one is a partial lap if the car did not start on the start/finish line.
+    pub(crate) lap_times: Vec<f64>,
+    /// Time the current lap started in seconds, s: the start time, then the last time the car
+    /// crossed the start/finish line (docs/15, equation 15.9)
+    pub(crate) lap_start_time: f64,
 }
 
 impl SimulationState {
@@ -90,6 +156,8 @@ impl SimulationState {
         Self {
             car: config.initial_car_state,
             time: config.start_time,
+            lap_times: Vec::new(),
+            lap_start_time: config.start_time,
         }
     }
 }
@@ -142,14 +210,19 @@ pub fn start_simulation(
         log.record(step, &simulation_state, false);
     }
 
-    while step < total_steps && !is_car_stopped(&simulation_state.car) {
+    while step < total_steps
+        && !is_car_stopped(&simulation_state.car)
+        && !are_laps_completed(&simulation_state, simulation_config)
+    {
         simulation_step(&mut simulation_state, simulation_config);
         step += 1;
         simulation_state.time =
             simulation_config.start_time + step as f64 * simulation_config.time_step;
 
         if let Some(log) = log.as_deref_mut() {
-            let last = step == total_steps || is_car_stopped(&simulation_state.car);
+            let last = step == total_steps
+                || is_car_stopped(&simulation_state.car)
+                || are_laps_completed(&simulation_state, simulation_config);
             log.record(step, &simulation_state, last);
         }
     }
@@ -255,11 +328,18 @@ fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &S
     );
 
     // Step 7: update positions with the new velocities (semi-implicit Euler)
+    let old_distance = simulation_state.car.distance;
     simulation_state.car.distance = get_car_distance(
         &simulation_state.car,
         simulation_config,
         simulation_state.car.speed,
     );
+
+    // Laps completed inside this step and the position on the track (docs/15)
+    if simulation_config.track.has_line() {
+        record_completed_laps(simulation_state, simulation_config, old_distance);
+        update_track_position(&mut simulation_state.car, &simulation_config.track);
+    }
 
     simulation_state.car.suspension = update_suspension_positions(
         &simulation_state.car.suspension,
@@ -269,9 +349,66 @@ fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &S
     simulation_state.time += simulation_config.time_step;
 }
 
-/// Calculates how many time steps are needed to reach end_time from start_time
+/// Records the laps the car completed in the step that took it from `old_distance` to its
+/// current distance: the lap counter and the lap times, with the crossing time interpolated
+/// inside the step (docs/15 section 15.7). `simulation_state.time` is the start of the step.
+fn record_completed_laps(
+    simulation_state: &mut SimulationState,
+    simulation_config: &SimulationConfig,
+    old_distance: f64,
+) {
+    let lap_length = simulation_config.track.lap_length;
+    let new_distance = simulation_state.car.distance;
+
+    // A loop, so a step longer than a lap (huge time step) still counts every lap
+    loop {
+        let line_distance = (simulation_state.car.lap + 1) as f64 * lap_length;
+        if new_distance < line_distance {
+            break;
+        }
+
+        let crossing_time = calculate_crossing_time(
+            simulation_state.time,
+            simulation_config.time_step,
+            line_distance,
+            old_distance,
+            new_distance,
+        );
+        simulation_state
+            .lap_times
+            .push(crossing_time - simulation_state.lap_start_time);
+        simulation_state.lap_start_time = crossing_time;
+        simulation_state.car.lap += 1;
+    }
+}
+
+/// Updates the track segment, the position and the curvature of the car from its distance
+/// and lap (docs/15 section 15.6, equation 15.8). Needs a track with XY points.
+fn update_track_position(car_state: &mut CarState, track: &Track) {
+    let lap_distance = car_state.distance - car_state.lap as f64 * track.lap_length;
+    let position = find_track_position(track, lap_distance, car_state.track_segment);
+
+    car_state.track_segment = position.segment;
+    car_state.x = position.x;
+    car_state.y = position.y;
+    car_state.curvature = position.curvature;
+}
+
+/// Checks if the run ends on laps and the car has completed them (docs/15 section 15.8)
+fn are_laps_completed(
+    simulation_state: &SimulationState,
+    simulation_config: &SimulationConfig,
+) -> bool {
+    match simulation_config.end_condition {
+        EndCondition::Laps { laps, .. } => simulation_state.lap_times.len() >= laps as usize,
+        EndCondition::Time { .. } => false,
+    }
+}
+
+/// Calculates how many time steps are needed to reach the end time from start_time: the end
+/// time of a timed run, the latest end time of a run that ends on laps
 fn calculate_total_steps(simulation_config: &SimulationConfig) -> u64 {
-    let span = simulation_config.end_time - simulation_config.start_time;
+    let span = simulation_config.end_condition.latest_end_time() - simulation_config.start_time;
     if span <= 0.0 || simulation_config.time_step <= 0.0 {
         return 0;
     }
@@ -474,6 +611,16 @@ impl SimulationConfig {
             return Err(format!("time_step must be > 0 s, got {}", self.time_step));
         }
 
+        validate_end_condition(&self.end_condition, self.start_time, &self.track)?;
+
+        // On an XY track the distance is measured from the start/finish line (docs/15 section 15.6)
+        if self.track.has_line() && initial_car_state.distance < 0.0 {
+            return Err(format!(
+                "initial_car_state.distance must be >= 0 m on a track with XY points, got {}",
+                initial_car_state.distance
+            ));
+        }
+
         for (index, &(start, end)) in self.track.braking_zones.iter().enumerate() {
             if !start.is_finite() || !end.is_finite() {
                 return Err(format!(
@@ -578,10 +725,53 @@ impl SimulationConfig {
     }
 }
 
+/// Checks the end condition of the run (docs/15 section 15.8)
+fn validate_end_condition(
+    end_condition: &EndCondition,
+    start_time: f64,
+    track: &Track,
+) -> Result<(), String> {
+    if !start_time.is_finite() {
+        return Err(format!("start_time must be finite, got {}", start_time));
+    }
+
+    match *end_condition {
+        EndCondition::Time { end_time } => {
+            if !end_time.is_finite() || end_time <= start_time {
+                return Err(format!(
+                    "end_condition time must be > start_time {} s, got {}",
+                    start_time, end_time
+                ));
+            }
+        }
+        EndCondition::Laps { laps, max_time } => {
+            if laps == 0 {
+                return Err("end_condition laps must be >= 1, got 0".to_string());
+            }
+            if !max_time.is_finite() || max_time <= start_time {
+                return Err(format!(
+                    "end_condition max_time must be > start_time {} s, got {}",
+                    start_time, max_time
+                ));
+            }
+            if !track.has_line() {
+                return Err(
+                    "end_condition laps needs a track with XY points (x_m,y_m), this track has \
+                     only braking zones"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Calculates the parts of the starting car state that follow from the starting conditions
 /// (speed, distance, gear, shift time left, suspension state) and the config, the same way a
 /// simulation step does:
 /// * `active_braking_zone` and `braking` from the distance and the track,
+/// * `lap`, `track_segment`, `x`, `y` and `curvature` from the distance and the XY track (docs/15),
 /// * `revs_hz`, the locked engine speed in the starting gear (docs/12, equation 12.2),
 /// * `acceleration`, a_x in the starting gear before any gear change (docs/11 section 11.8).
 ///
@@ -597,6 +787,12 @@ fn calculate_initial_car_state(simulation_config: &SimulationConfig) -> CarState
         car_state.distance,
         car_state.active_braking_zone,
     );
+    if simulation_config.track.has_line() {
+        let track = &simulation_config.track;
+        car_state.lap = (car_state.distance / track.lap_length).floor() as u32;
+        car_state.track_segment = 0;
+        update_track_position(&mut car_state, track);
+    }
     car_state.revs_hz = calculate_engine_revs_from_wheel_speed(
         &simulation_config.car.powertrain,
         simulation_config.car.tyre.wheel_radius,
@@ -807,8 +1003,9 @@ mod tests {
         calculate_peak_torque, calculate_powertrain_force, calculate_total_ratio,
     };
     use crate::physics::simulation::{
-        SimulationConfig, SimulationState, calculate_step_loads, calculate_total_steps,
-        get_car_acceleration, get_car_distance, get_car_speed, simulation_step, start_simulation,
+        EndCondition, SimulationConfig, SimulationState, calculate_step_loads,
+        calculate_total_steps, get_car_acceleration, get_car_distance, get_car_speed,
+        record_completed_laps, simulation_step, start_simulation, update_track_position,
     };
     use crate::physics::states::CarState;
     use crate::physics::suspension::{SuspensionState, calculate_tyre_loads, sum_axle_loads};
@@ -1026,7 +1223,7 @@ mod tests {
     #[test]
     fn test_simulation_convergence() {
         let mut simulation_config = SimulationConfig {
-            end_time: 5.0,
+            end_condition: EndCondition::Time { end_time: 5.0 },
             // Start at 0.01 s (500 steps): 0.1 s and 0.02 s break the suspension stability limit
             // (omega_max = 114 rad/s with the bump stops, docs/11 section 11.8)
             time_step: 0.01,
@@ -1065,7 +1262,7 @@ mod tests {
     #[test]
     fn test_simulation_speed_increase() {
         let mut simulation_config = SimulationConfig {
-            end_time: 1.0,
+            end_condition: EndCondition::Time { end_time: 1.0 },
             ..SimulationConfig::default()
         };
         // This test checks the time stepping only, so load transfer is switched off (CoG on the
@@ -1123,7 +1320,7 @@ mod tests {
     fn test_straight_line_stopping() {
         let mut simulation_config = SimulationConfig::default();
         simulation_config.track.braking_zones = vec![(0.0, 1000.0)];
-        simulation_config.end_time = 10.0;
+        simulation_config.end_condition = EndCondition::Time { end_time: 10.0 };
 
         let end_state = start_simulation(&mut simulation_config, None, false);
         assert_eq!(end_state.car.speed, 0.0);
@@ -1137,7 +1334,7 @@ mod tests {
         simulation_config.initial_car_state.speed = 0.0;
         simulation_config.initial_car_state.distance = 0.0;
         simulation_config.initial_car_state.gear = 1;
-        simulation_config.end_time = 1.0;
+        simulation_config.end_condition = EndCondition::Time { end_time: 1.0 };
 
         let end_state = start_simulation(&mut simulation_config, None, false);
 
@@ -1800,6 +1997,7 @@ mod tests {
         let mut prepared_twice = prepared(SimulationConfig {
             track: Track {
                 braking_zones: vec![(100.0, 200.0), (300.0, 400.0)],
+                ..Track::default()
             },
             initial_car_state: CarState {
                 distance: 250.0,
@@ -1972,7 +2170,7 @@ mod tests {
     #[test]
     fn test_calculate_total_steps() {
         let mut simulation_config = SimulationConfig {
-            end_time: 5.0,
+            end_condition: EndCondition::Time { end_time: 5.0 },
             time_step: 0.1 / 25.0,
             ..SimulationConfig::default()
         };
@@ -1980,7 +2178,7 @@ mod tests {
         // Accumulating 0.004 s in a loop gives 1251 steps, expected exactly 5.0 / 0.004 = 1250
         assert_eq!(calculate_total_steps(&simulation_config), 1250);
 
-        simulation_config.end_time = 1.0;
+        simulation_config.end_condition = EndCondition::Time { end_time: 1.0 };
         simulation_config.time_step = 1.5;
         // Partial last step is still executed: ceil(1.0 / 1.5) = 1
         assert_eq!(calculate_total_steps(&simulation_config), 1);
@@ -1988,5 +2186,232 @@ mod tests {
         simulation_config.time_step = 0.0;
         // Invalid time step must not loop forever
         assert_eq!(calculate_total_steps(&simulation_config), 0);
+    }
+
+    /// Test oval of docs/15 section 15.9, built here so the test does not need the data file:
+    /// two 75 m straights and two half circles of 15 m radius, points about 1 m apart
+    fn oval_track() -> Track {
+        use std::f64::consts::PI;
+        let (radius, straight, arc_segments) = (15.0, 75.0, 47);
+        let mut points = Vec::new();
+        points.extend((0..75).map(|index| (index as f64, 0.0)));
+        points.extend((0..arc_segments).map(|index| {
+            let angle = -PI / 2.0 + PI * index as f64 / arc_segments as f64;
+            (
+                straight + radius * angle.cos(),
+                radius + radius * angle.sin(),
+            )
+        }));
+        points.extend((0..75).map(|index| (straight - index as f64, 2.0 * radius)));
+        points.extend((0..arc_segments).map(|index| {
+            let angle = PI / 2.0 + PI * index as f64 / arc_segments as f64;
+            (radius * angle.cos(), radius + radius * angle.sin())
+        }));
+        Track::from_points(points, 0.0).unwrap()
+    }
+
+    #[test]
+    fn test_oval_track_geometry() {
+        let track = oval_track();
+
+        // Straight segments cut the corners a little short: 244.23 m, not 244.248 m
+        assert!(
+            (track.lap_length - 244.248).abs() < 0.02,
+            "{}",
+            track.lap_length
+        );
+        // Middle of the first straight, of the first corner and of the second straight
+        assert_eq!(track.curvatures[37], 0.0);
+        assert!((track.curvatures[75 + 23] * 15.0 - 1.0).abs() < 1e-3);
+        assert!(track.curvatures[75 + 47 + 37].abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_lap_times_at_constant_speed() {
+        // docs/15 section 15.10: at a constant 10 m/s every lap takes L_lap / 10 seconds,
+        // to much better than the 1 ms time step
+        let simulation_config = prepared(SimulationConfig {
+            track: oval_track(),
+            initial_car_state: CarState {
+                distance: 0.0,
+                ..CarState::default()
+            },
+            ..SimulationConfig::default()
+        });
+        let lap_length = simulation_config.track.lap_length;
+        let speed = 10.0;
+        let mut simulation_state = SimulationState::new(&simulation_config);
+
+        for step in 0..80_000_u64 {
+            simulation_state.time = step as f64 * simulation_config.time_step;
+            let old_distance = simulation_state.car.distance;
+            simulation_state.car.distance = (step + 1) as f64 * speed * simulation_config.time_step;
+            record_completed_laps(&mut simulation_state, &simulation_config, old_distance);
+            update_track_position(&mut simulation_state.car, &simulation_config.track);
+        }
+
+        // 800 m driven: 3 laps of 244.23 m completed
+        assert_eq!(simulation_state.lap_times.len(), 3);
+        assert_eq!(simulation_state.car.lap, 3);
+        for lap_time in &simulation_state.lap_times {
+            assert!(
+                (lap_time - lap_length / speed).abs() < 1e-9,
+                "Lap time {} s, expected {} s",
+                lap_time,
+                lap_length / speed
+            );
+        }
+
+        // 800 m - 3 laps = 67.31 m into lap 4, on the first straight
+        let lap_distance = 800.0 - 3.0 * lap_length;
+        assert!((simulation_state.car.x - lap_distance).abs() < 1e-6);
+        assert!(simulation_state.car.y.abs() < 1e-9);
+        assert_eq!(simulation_state.car.curvature, 0.0);
+    }
+
+    #[test]
+    fn test_run_ends_after_laps() {
+        let mut simulation_config = SimulationConfig {
+            track: oval_track(),
+            initial_car_state: CarState {
+                distance: 0.0,
+                ..CarState::default()
+            },
+            end_condition: EndCondition::Laps {
+                laps: 2,
+                max_time: 600.0,
+            },
+            ..SimulationConfig::default()
+        };
+        let lap_length = simulation_config.track.lap_length;
+
+        let end_state = start_simulation(&mut simulation_config, None, false);
+
+        // Stopped in the step that crossed the line the second time
+        assert_eq!(end_state.lap_times.len(), 2);
+        assert_eq!(end_state.car.lap, 2);
+        let past_the_line = end_state.car.distance - 2.0 * lap_length;
+        assert!(
+            (0.0..end_state.car.speed * simulation_config.time_step).contains(&past_the_line),
+            "Stopped {} m past the line",
+            past_the_line
+        );
+        assert!(end_state.time < 600.0);
+
+        // The lap times add up to the time of the second crossing, inside the last step
+        let total: f64 = end_state.lap_times.iter().sum();
+        assert!(total <= end_state.time && total > end_state.time - simulation_config.time_step);
+        // Flying lap 2 is faster than lap 1 from 10 m/s
+        assert!(end_state.lap_times[1] < end_state.lap_times[0]);
+
+        // Position: just past point 0, heading along the first straight
+        assert!((end_state.car.x - past_the_line).abs() < 1e-9);
+        assert!(end_state.car.y.abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_laps_run_stops_at_max_time() {
+        let mut simulation_config = SimulationConfig {
+            track: oval_track(),
+            end_condition: EndCondition::Laps {
+                laps: 1000,
+                max_time: 2.0,
+            },
+            ..SimulationConfig::default()
+        };
+
+        let end_state = start_simulation(&mut simulation_config, None, false);
+
+        assert!((end_state.time - 2.0).abs() < 1e-9);
+        assert!(end_state.lap_times.len() < 1000);
+    }
+
+    #[test]
+    fn test_partial_first_lap() {
+        // Starting 100 m after the line, the first crossing comes after L_lap - 100 m
+        let mut simulation_config = SimulationConfig {
+            track: oval_track(),
+            end_condition: EndCondition::Laps {
+                laps: 1,
+                max_time: 600.0,
+            },
+            ..SimulationConfig::default()
+        };
+        assert_eq!(simulation_config.initial_car_state.distance, 100.0);
+        let lap_length = simulation_config.track.lap_length;
+
+        let end_state = start_simulation(&mut simulation_config, None, false);
+
+        assert_eq!(end_state.lap_times.len(), 1);
+        assert!(end_state.car.distance >= lap_length);
+        assert!(end_state.car.distance < lap_length + 1.0);
+
+        // Starting on lap 2 (distance beyond one lap length) the lap counter starts at 1
+        let simulation_config = prepared(SimulationConfig {
+            track: oval_track(),
+            initial_car_state: CarState {
+                distance: lap_length + 10.0,
+                ..CarState::default()
+            },
+            ..SimulationConfig::default()
+        });
+        assert_eq!(simulation_config.initial_car_state.lap, 1);
+        assert!((simulation_config.initial_car_state.x - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_braking_zone_track_has_no_laps() {
+        // Baseline track: no XY points, so no laps, position or curvature
+        let mut simulation_config = SimulationConfig::default();
+        let end_state = start_simulation(&mut simulation_config, None, false);
+
+        assert!(end_state.lap_times.is_empty());
+        assert_eq!(end_state.car.lap, 0);
+        assert_eq!((end_state.car.x, end_state.car.y), (0.0, 0.0));
+        assert_eq!(end_state.car.curvature, 0.0);
+    }
+
+    #[test]
+    fn test_invalid_end_condition_rejected() {
+        type BreakConfig = fn(&mut SimulationConfig);
+        let cases: [(&str, BreakConfig); 7] = [
+            ("end time = start time", |c| {
+                c.end_condition = EndCondition::Time { end_time: 0.0 }
+            }),
+            ("end time NaN", |c| {
+                c.end_condition = EndCondition::Time { end_time: f64::NAN }
+            }),
+            ("laps on a braking zone track", |c| {
+                c.end_condition = EndCondition::Laps {
+                    laps: 1,
+                    max_time: 10.0,
+                }
+            }),
+            ("laps = 0", |c| {
+                c.track = oval_track();
+                c.end_condition = EndCondition::Laps {
+                    laps: 0,
+                    max_time: 10.0,
+                }
+            }),
+            ("max time before start time", |c| {
+                c.track = oval_track();
+                c.end_condition = EndCondition::Laps {
+                    laps: 1,
+                    max_time: -1.0,
+                }
+            }),
+            ("start time infinite", |c| c.start_time = f64::NEG_INFINITY),
+            ("negative distance on an XY track", |c| {
+                c.track = oval_track();
+                c.initial_car_state.distance = -1.0
+            }),
+        ];
+
+        for (name, change) in cases {
+            let mut simulation_config = SimulationConfig::default();
+            change(&mut simulation_config);
+            assert!(simulation_config.validate().is_err(), "{} accepted", name);
+        }
     }
 }

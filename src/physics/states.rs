@@ -39,6 +39,27 @@ pub struct CarState {
     pub acceleration: f64,
     /// Body heave and pitch motion, measured from static (docs/11 section 11.1)
     pub suspension: SuspensionState,
+    /// Number of times the distance has passed a whole lap length (k, docs/15 section 15.6),
+    /// 0 on a track without XY points. Calculated from the distance and the track, not in the
+    /// run file.
+    #[serde(skip)]
+    pub lap: u32,
+    /// Index of the track segment the car is on (docs/15 section 15.6).
+    /// Calculated from the distance and the track, not in the run file.
+    #[serde(skip)]
+    pub track_segment: usize,
+    /// Position on the track in meters, m, 0 on a track without XY points.
+    /// Calculated from the distance and the track, not in the run file.
+    #[serde(skip)]
+    pub x: f64,
+    /// Position on the track in meters, m, 0 on a track without XY points.
+    /// Calculated from the distance and the track, not in the run file.
+    #[serde(skip)]
+    pub y: f64,
+    /// Smoothed track curvature at the car in 1/m, positive for a left turn (docs/15), 0 on a
+    /// track without XY points. Calculated from the distance and the track, not in the run file.
+    #[serde(skip)]
+    pub curvature: f64,
 }
 
 impl Default for CarState {
@@ -53,6 +74,11 @@ impl Default for CarState {
             shift_time_left: 0.0,
             acceleration: 0.0,
             suspension: SuspensionState::default(),
+            lap: 0,
+            track_segment: 0,
+            x: 0.0,
+            y: 0.0,
+            curvature: 0.0,
         }
     }
 }

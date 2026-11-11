@@ -2,7 +2,7 @@ pub mod physics;
 
 use physics::car_state_log::CarStateLog;
 use physics::config::load_run;
-use physics::simulation::start_simulation;
+use physics::simulation::{EndCondition, start_simulation};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -10,6 +10,7 @@ use std::time::Instant;
 /// How to start the program, printed when the arguments are wrong
 const USAGE: &str = "Usage: cargo run -- <run file> [--log <csv file>] [--log-every <steps>]
   e.g. cargo run -- data/runs/baseline.toml
+       cargo run -- data/runs/oval_3_laps.toml
        cargo run --release -- data/runs/baseline.toml --log out/baseline.csv --log-every 10
   --log <csv file>     write the car state to a CSV file (overwritten if it exists)
   --log-every <steps>  write a row every this many steps (default 1); the first and the last
@@ -78,6 +79,38 @@ fn main() -> ExitCode {
     println!("Final Time    : {:.3} s", final_state.time);
     println!("Final Speed   : {:.2} m/s", final_state.car.speed);
     println!("Final Distance: {:.2} m", final_state.car.distance);
+
+    // 4. Lap times, on a track with XY points (docs/15 section 15.7)
+    if config.track.has_line() {
+        let lap_length = config.track.lap_length;
+        let start_distance = config.initial_car_state.distance % lap_length;
+
+        println!("\nLap length    : {:.3} m", lap_length);
+        for (index, lap_time) in final_state.lap_times.iter().enumerate() {
+            if index == 0 && start_distance > 0.0 {
+                println!(
+                    "Lap {:<3}       : {:.4} s (partial lap, started {:.2} m after the line)",
+                    index + 1,
+                    lap_time,
+                    start_distance
+                );
+            } else {
+                println!("Lap {:<3}       : {:.4} s", index + 1, lap_time);
+            }
+        }
+
+        if let EndCondition::Laps { laps, max_time } = config.end_condition
+            && final_state.lap_times.len() < laps as usize
+        {
+            println!(
+                "Warning: only {} of {} laps completed, the run stopped at {:.3} s (max_time_s = {} s)",
+                final_state.lap_times.len(),
+                laps,
+                final_state.time,
+                max_time
+            );
+        }
+    }
 
     ExitCode::SUCCESS
 }

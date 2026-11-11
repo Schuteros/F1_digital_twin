@@ -1,6 +1,6 @@
 # F1 Digital Twin Simulator For Design Validation
 
-Physics simulation of a Formula 1 car in progress. In reality, it is not limited to just F1 cars, but any type of car with 4 wheels. Current version 0.8.0.
+Physics simulation of a Formula 1 car in progress. In reality, it is not limited to just F1 cars, but any type of car with 4 wheels. Current version 0.9.0.
 
 ---
 
@@ -8,7 +8,8 @@ Physics simulation of a Formula 1 car in progress. In reality, it is not limited
 
 * **Goal:** We are using Rust programming language code to simulate 2D motion of F1 car.
 * **Current Phase:** We have made a simulation that can simulate 1D motion acceleration with simplified models
-* **Latest Milestone (0.8.0):** Tyre load sensitivity and the friction ellipse (docs/14): mu falls linearly with the tyre load, the grip is calculated per tyre from the four corner loads and summed per axle, and the longitudinal grip left over from a lateral force follows the friction ellipse (lateral force is 0 until cornering arrives). The baseline tyre has no load sensitivity, so the baseline results are unchanged
+* **Latest Milestone (0.9.0):** XY track, curvature and laps (docs/15): a track file can now hold the `x_m,y_m` points of the line the car drives. Before the run, the distance to each point, the lap length and the smoothed curvature are calculated. During the run the car has a position, a curvature, a lap counter and lap times (crossing time interpolated inside the step), and a run can end at a time or after a number of laps (`end_condition`). The car does not slow down for corners yet, and the baseline results are unchanged
+* **Previous Milestone (0.8.0):** Tyre load sensitivity and the friction ellipse (docs/14): mu falls linearly with the tyre load, the grip is calculated per tyre from the four corner loads and summed per axle, and the longitudinal grip left over from a lateral force follows the friction ellipse (lateral force is 0 until cornering arrives). The baseline tyre has no load sensitivity, so the baseline results are unchanged
 * **Previous Milestone (0.7.0):** Aerodynamic downforce and pressure points (docs/13): downforce acts at a centre of pressure measured from the front axle and drag acts at its own height, both fixed for now. They feed the body heave and pitch equations, so the springs carry them to the four tyre loads and the ride heights
  
 ---
@@ -24,11 +25,18 @@ cargo run --release -- data/runs/baseline.toml
 
 To write the car state to a CSV file while it runs, add `--log <file>`, and optionally `--log-every <steps>`
 to write only every Nth step (the first and last steps are always written). The columns are time, distance, speed,
-acceleration, gear, revs, braking flag, shift time left, braking zone index, heave, heave velocity, pitch and pitch
-rate, in SI units named in the header:
+acceleration, gear, revs, braking flag, shift time left, braking zone index, heave, heave velocity, pitch, pitch
+rate, lap, x, y and track curvature (the last four are 0 on a track without XY points), in SI units named in the header:
 
 ```
 cargo run --release -- data/runs/baseline.toml --log baseline.csv --log-every 10
+```
+
+On a track with XY points the program prints the lap length and every lap time at the end. To drive three laps of
+the test oval (docs/15 section 15.9):
+
+```
+cargo run --release -- data/runs/oval_3_laps.toml
 ```
 
 Without a run file the program prints a usage line and exits with an error. A bad data file (missing or unknown key,
@@ -40,8 +48,10 @@ data/
   cars/baseline.toml           mass, geometry, aero, brakes, powertrain (incl. torque curve), suspension
   tyres/baseline.toml          mu_x_ref, mu_y_ref, reference_load_N, load_sensitivity, mu_rolling, mu_breakaway, wheel_radius_m
   tracks/straight_1000m.csv    braking zones, one per row
+  tracks/oval_244m.csv         XY points of a test oval, one per row (docs/15)
   environments/standard.toml   air density, gravity
   runs/baseline.toml           picks the files above + time settings + initial state
+  runs/oval_3_laps.toml        three laps of the oval, ends on laps
   README.md                    what each file is, every key with its unit
 ```
 
@@ -65,14 +75,14 @@ all suspension values finite, aero downforce coefficient and centre of pressure 
 and for the powertrain (docs/12): a torque curve of at least 2 points with strictly increasing engine speeds and
 finite torques >= 0 that covers `min_revs` to `max_revs`, `min_revs` < `max_revs`, non-empty strictly decreasing
 gear ratios > 0, primary ratio > 0, final drive > 0, `shift_time` >= 0, `downshift_hysteresis` >= 0, wheel radius > 0, the starting
-gear within the gearbox, all values finite, braking zones finite with end >= start, and the starting state: speed >= 0,
-shift time left >= 0, distance and suspension state finite) and panics with the reason if it is invalid.
+gear within the gearbox, all values finite, braking zones finite with end >= start, the end condition (end time or max time > start time, laps >= 1 and only on a track with XY points, docs/15 section 15.8), and the starting state: speed >= 0,
+shift time left >= 0, distance and suspension state finite, distance >= 0 on a track with XY points) and panics with the reason if it is invalid.
 It then computes everything that stays the same for the whole run, so the steps don't recalculate it:
 `static_values` (`calculate_static_car_values`: CoG to axle distances, static corner loads, where the aero forces act)
 and, with `fill_powertrain_tables`, the peak torque, `clutch_lock_speeds` (docs/12 equation 12.8) and
 `upshift_speeds` (docs/12 section 12.6, scan in 0.01 m/s steps).
 Last, it calculates the part of the starting car state that follows from the starting conditions and the config
-(`calculate_initial_car_state`): active braking zone, braking flag, locked engine speed `revs_hz` and acceleration.
+(`calculate_initial_car_state`): active braking zone, braking flag, lap, track segment, position and curvature (docs/15), locked engine speed `revs_hz` and acceleration.
 The first step recalculates them the same way, so they don't change the results. `load_run` calls `prepare()` when the
 data files are loaded, so a bad file is reported before the simulation starts and the loaded config is complete.
 
@@ -88,7 +98,12 @@ Every cycle (`simulation_step`) executes in this order:
 6. **Body Accelerations (step 5):** Heave and pitch accelerations from the same corner forces, this step's a_x and the aero forces (`calculate_body_accelerations`, docs/13 equations 13.2 and 13.3).
 7. **Velocity Updates (step 6):** Speed (`get_car_speed`), heave velocity and pitch rate (`update_suspension_velocities`), each by acceleration × time step. If the car drops to or below 0 m/s while braking, clamp speed to 0.0 m/s and acceleration to 0.0 m/s². From then on a_x is 0 and the suspension keeps integrating, so the body settles back to static.
 8. **Position Updates (step 7):** Distance (`get_car_distance`), heave and pitch (`update_suspension_positions`), each by the **new** velocity × time step (semi-implicit Euler).
-9. **Time Step Advancement:** Increment total simulation runtime by `time_step`.
+9. **Laps and Track Position (docs/15, only on a track with XY points):** If the distance passed a whole number of lap lengths in this step, `record_completed_laps` interpolates the crossing time inside the step (`calculate_crossing_time`, equation 15.9), stores the lap time and counts the lap. Then `update_track_position` finds the segment the car is on, searching forward from the previous one, and interpolates x, y and the curvature (`find_track_position`).
+10. **Time Step Advancement:** Increment total simulation runtime by `time_step`.
+
+The run ends at the end time, or after the laps of `EndCondition::Laps` (at `max_time` at the latest), or when the car has braked to a stop.
+
+The track line is calculated once when the track file is loaded (`Track::from_points`, docs/15): segment lengths, distance to each point and lap length (equations 15.1 and 15.2), curvature from the heading change at each point (15.3 and 15.4) and the moving average over `curvature_smoothing_window_m` (15.6).
 
 ---
 

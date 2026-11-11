@@ -1,5 +1,5 @@
 # Baseline run: the same config main.rs used before data files
-# (SimulationConfig { end_time: 100000.0, ..Default::default() }).
+# (SimulationConfig { end_condition: EndCondition::Time { end_time: 100000.0 }, ..Default::default() }).
 # Start it with: cargo run -- data/runs/baseline.toml
 format_version = 1
 
@@ -11,7 +11,9 @@ track = "../tracks/straight_1000m.csv"
 environment = "../environments/standard.toml"
 
 start_time_s = 0.0
-end_time_s = 100000.0
+# When the run ends: { time_s = ... } or { laps = ..., max_time_s = ... } (docs/15 section 15.8).
+# It also ends when the car has braked to a stop.
+end_condition = { time_s = 100000.0 }
 # Must satisfy the suspension stability limit omega_max * time_step < 2 (docs/11 section 11.8)
 time_step_s = 0.001
 
