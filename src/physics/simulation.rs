@@ -7,6 +7,10 @@ use crate::physics::cornering::{
     calculate_corner_speed_limits, calculate_lateral_acceleration, calculate_wanted_acceleration,
     is_over_lateral_grip,
 };
+use crate::physics::driver::{
+    Driver, calculate_planning_tyre, calculate_target_speed_at, calculate_target_speeds,
+    interpolate_corner_speed_limit,
+};
 use crate::physics::environment::Environment;
 use crate::physics::forces::{
     calculate_acceleration, calculate_net_force, calculate_net_force_for_wanted_acceleration,
@@ -111,6 +115,9 @@ pub struct SimulationConfig {
     /// Contains the track configuration
     pub track: Track,
 
+    /// How the driver plans the lap (docs/17)
+    pub driver: Driver,
+
     /// Start time of the simulation in seconds, s
     /// **Range:**
     /// * min: f64::MIN
@@ -130,9 +137,14 @@ pub struct SimulationConfig {
     pub(crate) static_values: StaticCarValues,
 
     /// Corner speed limit at every point of the track line in meters per second, m/s (docs/16
-    /// section 16.5). Empty in Default, in a loaded config and for a track without XY points,
-    /// filled by `prepare`.
+    /// section 16.5), with the driver's grip margin (docs/17 section 17.2). Empty in Default,
+    /// in a loaded config and for a track without XY points, filled by `prepare`.
     pub(crate) corner_speed_limits: Vec<f64>,
+
+    /// Target speed at every point of the track line in meters per second, m/s: the corner
+    /// speed limits lowered before each corner so the car can brake down to them (docs/17
+    /// section 17.5). Empty like `corner_speed_limits`, filled by `prepare`.
+    pub(crate) target_speeds: Vec<f64>,
 }
 
 impl Default for SimulationConfig {
@@ -142,11 +154,13 @@ impl Default for SimulationConfig {
             car: Car::default(),
             environment: Environment::default(),
             track: Track::default(),
+            driver: Driver::default(),
             start_time: 0.0,
             end_condition: EndCondition::Time { end_time: 1.0 },
             time_step: 0.001,
             static_values: StaticCarValues::default(),
             corner_speed_limits: Vec::new(),
+            target_speeds: Vec::new(),
         }
     }
 }
@@ -404,9 +418,9 @@ fn record_completed_laps(
 }
 
 /// Updates the track segment, the position and the curvature of the car from its distance
-/// and lap (docs/15 section 15.6, equation 15.8), and the corner speed limit at the car: the
-/// lower one of the two points of its segment (docs/16 section 16.7). Needs a track with XY
-/// points and `prepare` to have run.
+/// and lap (docs/15 section 15.6, equation 15.8), the corner speed limit at the car (docs/17
+/// equation 17.7) and the target speed at the place the car will be after the next time step
+/// (docs/17, equation 17.9). Needs a track with XY points and `prepare` to have run.
 fn update_track_position(car_state: &mut CarState, simulation_config: &SimulationConfig) {
     let track = &simulation_config.track;
     let lap_distance = car_state.distance - car_state.lap as f64 * track.lap_length;
@@ -419,8 +433,19 @@ fn update_track_position(car_state: &mut CarState, simulation_config: &Simulatio
 
     let corner_speed_limits = &simulation_config.corner_speed_limits;
     let next_point = (position.segment + 1) % corner_speed_limits.len();
-    car_state.corner_speed_limit =
-        corner_speed_limits[position.segment].min(corner_speed_limits[next_point]);
+    car_state.corner_speed_limit = interpolate_corner_speed_limit(
+        corner_speed_limits[position.segment],
+        corner_speed_limits[next_point],
+        position.fraction,
+    );
+
+    car_state.target_speed = calculate_target_speed_at(
+        track,
+        corner_speed_limits,
+        &simulation_config.target_speeds,
+        lap_distance + car_state.speed * simulation_config.time_step,
+        position.segment,
+    );
 }
 
 /// Checks if the run ends on laps and the car has completed them (docs/15 section 15.8)
@@ -490,9 +515,10 @@ pub(crate) fn calculate_step_loads(
         OVER_GRIP_LIMIT_MARGIN,
     );
 
-    // A car that is too fast for the corner cannot hold the line anyway, so the driver uses
-    // the whole grip for braking in a straight line (docs/16 section 16.7)
-    let ellipse_lateral_forces = if is_above_corner_speed_limit(car_state) {
+    // A car that is over the grip limit and too fast cannot hold the line anyway, so the driver
+    // uses the whole grip for braking in a straight line (docs/16 section 16.7, docs/17
+    // section 17.6)
+    let ellipse_lateral_forces = if over_grip_limit && is_above_target_speed(car_state) {
         AxleLateralForces::default()
     } else {
         axle_lateral_forces
@@ -512,13 +538,14 @@ pub(crate) fn calculate_step_loads(
     }
 }
 
-/// Speeds within this fraction above the corner speed limit count as on the limit. The margin
-/// only keeps rounding errors of a car that holds the limit from being seen as too fast.
-const CORNER_SPEED_LIMIT_TOLERANCE: f64 = 1e-9;
+/// Speeds within this fraction above the target speed count as on the target. The margin only
+/// keeps rounding errors of a car that holds the target from being seen as too fast.
+const TARGET_SPEED_TOLERANCE: f64 = 1e-9;
 
-/// Checks if the car is faster than the corner speed limit at its position (docs/16 section 16.7)
-fn is_above_corner_speed_limit(car_state: &CarState) -> bool {
-    car_state.speed > car_state.corner_speed_limit * (1.0 + CORNER_SPEED_LIMIT_TOLERANCE)
+/// Checks if the car is faster than the driver wants it to be after this step (docs/17
+/// section 17.6)
+fn is_above_target_speed(car_state: &CarState) -> bool {
+    car_state.speed > car_state.target_speed * (1.0 + TARGET_SPEED_TOLERANCE)
 }
 
 /// Calculates car acceleration a_x in m/s^2 from the loads at the start of the step.
@@ -527,8 +554,8 @@ fn is_above_corner_speed_limit(car_state: &CarState) -> bool {
 /// 1 to 4), so there is no circular dependency between acceleration and load transfer.
 ///
 /// On a track with XY points the driver asks for the acceleration that brings the car to the
-/// corner speed limit in this step, and gets as much of it as the car can give (docs/16
-/// section 16.7). On a track with braking zones the car is at full throttle or full braking.
+/// target speed in this step, and gets as much of it as the car can give (docs/16 section
+/// 16.7, docs/17 section 17.6). On a track with braking zones the car is at full throttle or full braking.
 pub(crate) fn get_car_acceleration(
     simulation_config: &SimulationConfig,
     car_state: &CarState,
@@ -544,7 +571,7 @@ pub(crate) fn get_car_acceleration(
             &step_loads.aero_loads,
             calculate_wanted_acceleration(
                 car_state.speed,
-                car_state.corner_speed_limit,
+                car_state.target_speed,
                 simulation_config.time_step,
             ),
         )
@@ -590,11 +617,22 @@ impl SimulationConfig {
         self.static_values =
             calculate_static_car_values(&self.car, self.environment.g_acceleration);
         fill_powertrain_tables(&mut self.car.powertrain, self.car.tyre.wheel_radius);
+        // The lap plan (docs/17): corner speed limits and braking with the planning tyre
+        let planning_tyre = calculate_planning_tyre(&self.car.tyre, &self.driver);
         self.corner_speed_limits = calculate_corner_speed_limits(
             &self.car,
+            &planning_tyre,
             &self.environment,
             &self.static_values.axle_distances,
             &self.track,
+        );
+        self.target_speeds = calculate_target_speeds(
+            &self.car,
+            &planning_tyre,
+            &self.environment,
+            &self.static_values.axle_distances,
+            &self.track,
+            &self.corner_speed_limits,
         );
 
         // The acceleration needs the values above, so they are filled first
@@ -701,6 +739,15 @@ impl SimulationConfig {
         }
 
         validate_end_condition(&self.end_condition, self.start_time, &self.track)?;
+
+        // A margin of 1 would leave the planning tyre without any grip (docs/17, equation 17.1)
+        let grip_margin = self.driver.grip_margin;
+        if !(0.0..1.0).contains(&grip_margin) {
+            return Err(format!(
+                "driver.grip_margin must be in 0.0..1.0, got {}",
+                grip_margin
+            ));
+        }
 
         // On an XY track the distance is measured from the start/finish line (docs/15 section 15.6)
         if self.track.has_line() && initial_car_state.distance < 0.0 {
@@ -1090,6 +1137,7 @@ mod tests {
     use crate::physics::aero::calculate_aero_loads;
     use crate::physics::aero::calculate_air_drag;
     use crate::physics::cornering::calculate_constant_speed_axle_loads;
+    use crate::physics::driver::Driver;
     use crate::physics::powertrain::{
         Drivetrain, calculate_engine_revs_from_wheel_speed, calculate_engine_torque,
         calculate_peak_torque, calculate_powertrain_force, calculate_total_ratio,
@@ -2280,26 +2328,9 @@ mod tests {
         assert_eq!(calculate_total_steps(&simulation_config), 0);
     }
 
-    /// Test oval of docs/15 section 15.9, built here so the test does not need the data file:
-    /// two 75 m straights and two half circles of 15 m radius, points about 1 m apart
+    /// Test oval of docs/15 section 15.9
     fn oval_track() -> Track {
-        use std::f64::consts::PI;
-        let (radius, straight, arc_segments) = (15.0, 75.0, 47);
-        let mut points = Vec::new();
-        points.extend((0..75).map(|index| (index as f64, 0.0)));
-        points.extend((0..arc_segments).map(|index| {
-            let angle = -PI / 2.0 + PI * index as f64 / arc_segments as f64;
-            (
-                straight + radius * angle.cos(),
-                radius + radius * angle.sin(),
-            )
-        }));
-        points.extend((0..75).map(|index| (straight - index as f64, 2.0 * radius)));
-        points.extend((0..arc_segments).map(|index| {
-            let angle = PI / 2.0 + PI * index as f64 / arc_segments as f64;
-            (radius * angle.cos(), radius + radius * angle.sin())
-        }));
-        Track::from_points(points, 0.0).unwrap()
+        crate::physics::track::oval_test_track()
     }
 
     #[test]
@@ -2597,8 +2628,8 @@ mod tests {
 
     #[test]
     fn test_too_fast_into_corner_is_over_grip_limit() {
-        // docs/16 section 16.7: nothing brakes before a corner yet, so the car arrives at the
-        // first corner of the oval far too fast
+        // docs/16 section 16.7: a car that arrives at a corner far too fast. The braking plan
+        // of docs/17 is taken out below, so nothing brakes before the first corner of the oval.
         let mut simulation_config = SimulationConfig {
             track: oval_track(),
             initial_car_state: CarState {
@@ -2608,6 +2639,7 @@ mod tests {
             ..SimulationConfig::default()
         };
         simulation_config.prepare().unwrap();
+        simulation_config.target_speeds = simulation_config.corner_speed_limits.clone();
         let corner_limit = simulation_config.corner_speed_limits[75 + 23];
         assert!((corner_limit - 11.61).abs() < 0.01, "{}", corner_limit);
         // No limit on the straight
@@ -2647,5 +2679,145 @@ mod tests {
         assert_eq!(end_state.car.corner_speed_limit, f64::INFINITY);
         assert_eq!(end_state.car.lateral_acceleration, 0.0);
         assert!(!end_state.car.over_grip_limit);
+    }
+
+    /// Oval config with the given grip margin, starting on the line, prepared
+    fn oval_config(grip_margin: f64) -> SimulationConfig {
+        prepared(SimulationConfig {
+            track: oval_track(),
+            driver: Driver { grip_margin },
+            initial_car_state: CarState {
+                distance: 0.0,
+                ..CarState::default()
+            },
+            end_condition: EndCondition::Laps {
+                laps: 3,
+                max_time: 120.0,
+            },
+            ..SimulationConfig::default()
+        })
+    }
+
+    #[test]
+    fn test_oval_brakes_before_corners() {
+        // docs/17 section 17.8: with a 5 % grip margin the car brakes before each corner, stays
+        // on the plan and never goes over the grip limit
+        let simulation_config = oval_config(0.05);
+        let mut simulation_state = SimulationState::new(&simulation_config);
+
+        let mut braked_on_straight = false;
+        let mut max_speed_above_target: f64 = 0.0;
+        let mut max_speed: f64 = 0.0;
+        while simulation_state.lap_times.len() < 3 {
+            // Segments 20 to 72 are the first straight, with zero curvature at both ends
+            let on_straight = (20..73).contains(&simulation_state.car.track_segment);
+            simulation_step(&mut simulation_state, &simulation_config);
+            let car = &simulation_state.car;
+
+            braked_on_straight |= on_straight && car.acceleration < -5.0;
+            max_speed_above_target = max_speed_above_target.max(car.speed - car.target_speed);
+            max_speed = max_speed.max(car.speed);
+
+            assert!(
+                !car.over_grip_limit,
+                "Over the grip limit at {} m",
+                car.distance
+            );
+            // Never faster than the corner allows where the car is
+            assert!(
+                car.speed <= car.corner_speed_limit * (1.0 + 1e-9),
+                "{} m/s > {} m/s at {} m",
+                car.speed,
+                car.corner_speed_limit,
+                car.distance
+            );
+        }
+
+        assert!(braked_on_straight);
+        // The suspension needs a moment to pitch, so the car falls a little behind the plan
+        // when the braking starts (docs/17 section 17.9): 0.02 m/s here
+        assert!(max_speed_above_target < 0.05, "{}", max_speed_above_target);
+        // Faster on the straight than in the corners (11.31 m/s)
+        assert!(max_speed > 20.0, "{}", max_speed);
+
+        // From lap 2 every lap is the same, up to where the 1 ms steps fall on the track
+        let lap_times = &simulation_state.lap_times;
+        assert!(
+            (lap_times[2] - lap_times[1]).abs() < 1e-3,
+            "{:?}",
+            lap_times
+        );
+        assert!(lap_times[0] > lap_times[1]);
+    }
+
+    #[test]
+    fn test_grip_margin_slows_the_lap() {
+        // docs/17 section 17.2: lower corner speed limits everywhere, so a slower lap
+        let no_margin = oval_config(0.0);
+        let with_margin = oval_config(0.05);
+
+        let corner = 75 + 23;
+        assert!((no_margin.corner_speed_limits[corner] - 11.61).abs() < 0.005);
+        assert!((with_margin.corner_speed_limits[corner] - 11.31).abs() < 0.005);
+        for (limit, limit_with_margin) in no_margin
+            .corner_speed_limits
+            .iter()
+            .zip(&with_margin.corner_speed_limits)
+        {
+            assert!(limit_with_margin < limit || limit.is_infinite());
+        }
+
+        let lap_time = |mut simulation_config: SimulationConfig| {
+            start_simulation(&mut simulation_config, None, false).lap_times[1]
+        };
+        assert!(lap_time(with_margin) > lap_time(no_margin));
+    }
+
+    #[test]
+    fn test_no_margin_goes_over_grip_limit_when_braking_starts() {
+        // docs/17 section 17.9: the plan has the braking load transfer at once, the car has to
+        // pitch first. Without a margin that puts it over the grip limit for a moment at each
+        // corner entry. A 1 % margin is enough to cover it on the oval.
+        let count_steps_over_limit = |grip_margin: f64| {
+            let simulation_config = oval_config(grip_margin);
+            let mut simulation_state = SimulationState::new(&simulation_config);
+            let mut steps_over_limit = 0;
+            while simulation_state.lap_times.len() < 2 {
+                simulation_step(&mut simulation_state, &simulation_config);
+                if simulation_state.car.over_grip_limit {
+                    steps_over_limit += 1;
+                }
+            }
+            steps_over_limit
+        };
+
+        let without_margin = count_steps_over_limit(0.0);
+        // 4 corner entries of less than 0.15 s each
+        assert!(
+            without_margin > 0 && without_margin < 600,
+            "{}",
+            without_margin
+        );
+        assert_eq!(count_steps_over_limit(0.01), 0);
+    }
+
+    #[test]
+    fn test_invalid_grip_margin_rejected() {
+        for grip_margin in [-0.01, 1.0, 1.5, f64::NAN] {
+            let simulation_config = SimulationConfig {
+                driver: Driver { grip_margin },
+                ..SimulationConfig::default()
+            };
+            let message = simulation_config.validate().unwrap_err();
+            assert!(message.contains("driver.grip_margin"), "{}", message);
+        }
+        // 0 and just below 1 are allowed
+        for grip_margin in [0.0, 0.99] {
+            let simulation_config = SimulationConfig {
+                driver: Driver { grip_margin },
+                ..SimulationConfig::default()
+            };
+            assert!(simulation_config.validate().is_ok());
+        }
     }
 }

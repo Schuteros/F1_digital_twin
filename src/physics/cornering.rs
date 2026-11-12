@@ -114,6 +114,7 @@ pub(crate) fn calculate_constant_speed_axle_loads(
 /// no tyre needs more lateral force than it can make (docs/16 section 16.5, steps 1 to 3)
 fn can_hold_corner(
     car: &Car,
+    tyre: &Tyre,
     environment: &Environment,
     axle_distances: &AxleDistances,
     curvature: f64,
@@ -132,23 +133,26 @@ fn can_hold_corner(
         axle_distances,
     );
 
-    !is_over_lateral_grip(&car.tyre, &tyre_loads, &axle_lateral_forces, 0.0)
+    !is_over_lateral_grip(tyre, &tyre_loads, &axle_lateral_forces, 0.0)
 }
 
 /// Calculates the corner speed limit in m/s: the highest constant speed at which the tyres can
 /// hold a corner of `curvature` in 1/m (docs/16 section 16.5).
 ///
 /// It is found by halving the search range, with the tyre model of docs/14, so load
-/// sensitivity is included. Returns infinity if the car can hold the corner at any speed
+/// sensitivity is included. `tyre` is the tyre the driver plans with (docs/17 section 17.2),
+/// the car's own tyre for a driver without a grip margin. Returns infinity if the car can hold the corner at any speed
 /// (a straight, or a corner so wide that downforce grows faster than the force it needs).
 pub(crate) fn calculate_corner_speed_limit(
     car: &Car,
+    tyre: &Tyre,
     environment: &Environment,
     axle_distances: &AxleDistances,
     curvature: f64,
 ) -> f64 {
     if can_hold_corner(
         car,
+        tyre,
         environment,
         axle_distances,
         curvature,
@@ -162,7 +166,7 @@ pub(crate) fn calculate_corner_speed_limit(
     let mut slides = SEARCH_MAX_SPEED;
     for _ in 0..SEARCH_HALVINGS {
         let speed = 0.5 * (holds + slides);
-        if can_hold_corner(car, environment, axle_distances, curvature, speed) {
+        if can_hold_corner(car, tyre, environment, axle_distances, curvature, speed) {
             holds = speed;
         } else {
             slides = speed;
@@ -176,6 +180,7 @@ pub(crate) fn calculate_corner_speed_limit(
 /// 16.7). Empty for a track without XY points.
 pub(crate) fn calculate_corner_speed_limits(
     car: &Car,
+    tyre: &Tyre,
     environment: &Environment,
     axle_distances: &AxleDistances,
     track: &Track,
@@ -183,19 +188,18 @@ pub(crate) fn calculate_corner_speed_limits(
     track
         .curvatures
         .iter()
-        .map(|&curvature| calculate_corner_speed_limit(car, environment, axle_distances, curvature))
+        .map(|&curvature| {
+            calculate_corner_speed_limit(car, tyre, environment, axle_distances, curvature)
+        })
         .collect()
 }
 
 /// Calculates the acceleration in m/s^2 the driver asks for: the one that brings the car
-/// exactly to the corner speed limit in this time step (docs/16, equation 16.16). Positive
-/// below the limit, negative above it, infinite where there is no limit (full throttle).
-pub(crate) fn calculate_wanted_acceleration(
-    speed: f64,
-    corner_speed_limit: f64,
-    time_step: f64,
-) -> f64 {
-    (corner_speed_limit - speed) / time_step
+/// exactly to `target_speed` in this time step (docs/16 equation 16.16, docs/17 equation 17.9).
+/// Positive below the target, negative above it, infinite where there is no target (full
+/// throttle).
+pub(crate) fn calculate_wanted_acceleration(speed: f64, target_speed: f64, time_step: f64) -> f64 {
+    (target_speed - speed) / time_step
 }
 
 #[cfg(test)]
@@ -270,7 +274,7 @@ mod tests {
     fn limit(car: &Car, curvature: f64) -> f64 {
         let environment = Environment::default();
         let axle_distances = calculate_axle_distances(&car.mass, &car.geometry);
-        calculate_corner_speed_limit(car, &environment, &axle_distances, curvature)
+        calculate_corner_speed_limit(car, &car.tyre, &environment, &axle_distances, curvature)
     }
 
     /// The car of the balance flip example in docs/16 section 16.6: 52 % of the mass on the
@@ -546,7 +550,8 @@ mod tests {
         // Square 10 m x 10 m: every point has the same curvature, so the same limit
         let square = vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
         let track = Track::from_points(square, 0.0).unwrap();
-        let limits = calculate_corner_speed_limits(&car, &environment, &axle_distances, &track);
+        let limits =
+            calculate_corner_speed_limits(&car, &car.tyre, &environment, &axle_distances, &track);
         assert_eq!(limits.len(), 4);
         assert!(
             limits
@@ -555,8 +560,13 @@ mod tests {
         );
 
         // Track without XY points: no limits
-        let limits =
-            calculate_corner_speed_limits(&car, &environment, &axle_distances, &Track::default());
+        let limits = calculate_corner_speed_limits(
+            &car,
+            &car.tyre,
+            &environment,
+            &axle_distances,
+            &Track::default(),
+        );
         assert!(limits.is_empty());
     }
 }

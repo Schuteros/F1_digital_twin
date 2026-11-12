@@ -20,6 +20,14 @@ curvature_smoothing_window_m = 0.0
 # Must satisfy the suspension stability limit omega_max * time_step < 2 (docs/11 section 11.8)
 time_step_s = 0.001
 
+# How the driver plans the lap (docs/17). Optional, without it grip_margin = 0.0.
+[driver]
+# The driver plans corner speeds and braking points with both tyre friction coefficients
+# (mu_x_ref, mu_y_ref) multiplied by (1 - grip_margin). The simulated tyres keep their full grip,
+# so the difference is a reserve. 0.0 = plans exactly on the limit, 0.05 = 5 % less grip,
+# about 2.5 % less corner speed. Must be 0.0 up to (not including) 1.0.
+grip_margin = 0.0
+
 # Starting conditions of the car at start_time_s: on the start/finish line (distance 0),
 # rolling at 5 m/s, in 1st gear, not shifting.
 # The engine speed, braking zone, braking flag and acceleration are not set here: they are

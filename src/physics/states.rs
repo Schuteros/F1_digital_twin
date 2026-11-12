@@ -66,6 +66,12 @@ pub struct CarState {
     /// in the run file.
     #[serde(skip, default = "no_corner_speed_limit")]
     pub corner_speed_limit: f64,
+    /// Speed the driver wants to have after the next time step in meters per second, m/s: the
+    /// planned speed at the place the car will be then (docs/17 section 17.6). Infinite where
+    /// the car never has to lift and on a track without XY points. Calculated from the
+    /// distance, the speed and the plan, not in the run file.
+    #[serde(skip, default = "no_corner_speed_limit")]
+    pub target_speed: f64,
     /// Lateral acceleration the line needs at the current speed in meters per second squared,
     /// m/s^2, always >= 0 (docs/16, equation 16.1). Output only, calculated from the speed and
     /// the curvature, not in the run file.
@@ -77,8 +83,8 @@ pub struct CarState {
     pub over_grip_limit: bool,
 }
 
-/// Corner speed limit of a car state read from a run file, before `prepare` calculates it:
-/// no limit
+/// Corner speed limit and target speed of a car state read from a run file, before `prepare`
+/// calculates them: none
 fn no_corner_speed_limit() -> f64 {
     f64::INFINITY
 }
@@ -101,6 +107,7 @@ impl Default for CarState {
             y: 0.0,
             curvature: 0.0,
             corner_speed_limit: f64::INFINITY,
+            target_speed: f64::INFINITY,
             lateral_acceleration: 0.0,
             over_grip_limit: false,
         }

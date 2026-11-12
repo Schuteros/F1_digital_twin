@@ -39,6 +39,8 @@ impl Default for Track {
 pub(crate) struct TrackPosition {
     /// Index i of the segment the car is on, from point i to point i+1
     pub segment: usize,
+    /// How far along the segment the car is, 0.0 at point i to 1.0 at point i+1
+    pub fraction: f64,
     /// Position in meters, m
     pub x: f64,
     /// Position in meters, m
@@ -218,8 +220,34 @@ fn smooth_curvatures(
 pub(crate) fn find_track_position(
     track: &Track,
     lap_distance: f64,
-    mut segment: usize,
+    segment: usize,
 ) -> TrackPosition {
+    let (segment, fraction) = find_track_segment(track, lap_distance, segment);
+    let next = (segment + 1) % track.points.len();
+
+    let (x, y) = track.points[segment];
+    let (next_x, next_y) = track.points[next];
+
+    TrackPosition {
+        segment,
+        fraction,
+        x: x + fraction * (next_x - x),
+        y: y + fraction * (next_y - y),
+        curvature: track.curvatures[segment]
+            + fraction * (track.curvatures[next] - track.curvatures[segment]),
+    }
+}
+
+/// Finds the segment of the XY line that is `lap_distance` meters from the start/finish line,
+/// and how far along that segment it is as a fraction 0.0..=1.0 (docs/15 section 15.6).
+///
+/// The search starts at `segment` and moves forward. If `lap_distance` is before that segment,
+/// it starts again from point 0.
+pub(crate) fn find_track_segment(
+    track: &Track,
+    lap_distance: f64,
+    mut segment: usize,
+) -> (usize, f64) {
     let count = track.points.len();
     if segment >= count || lap_distance < track.distances[segment] {
         segment = 0;
@@ -228,25 +256,15 @@ pub(crate) fn find_track_position(
         segment += 1;
     }
 
-    let next = (segment + 1) % count;
-    let segment_end = if next == 0 {
+    let segment_end = if segment + 1 == count {
         track.lap_length
     } else {
-        track.distances[next]
+        track.distances[segment + 1]
     };
     let segment_length = segment_end - track.distances[segment];
     let fraction = ((lap_distance - track.distances[segment]) / segment_length).clamp(0.0, 1.0);
 
-    let (x, y) = track.points[segment];
-    let (next_x, next_y) = track.points[next];
-
-    TrackPosition {
-        segment,
-        x: x + fraction * (next_x - x),
-        y: y + fraction * (next_y - y),
-        curvature: track.curvatures[segment]
-            + fraction * (track.curvatures[next] - track.curvatures[segment]),
-    }
+    (segment, fraction)
 }
 
 /// Time in seconds, s, when the car crossed `line_distance` inside a time step that took it
@@ -290,6 +308,29 @@ pub(crate) fn is_braking_zone(
     } else {
         false
     }
+}
+
+/// Test oval of docs/15 section 15.9, built in code so tests do not need the data file: two
+/// 75 m straights and two half circles of 15 m radius, points about 1 m apart, anticlockwise
+/// from (0, 0) along +x. Points 0 to 74 are the first straight, 75 to 121 the first corner.
+#[cfg(test)]
+pub(crate) fn oval_test_track() -> Track {
+    let (radius, straight, arc_segments) = (15.0, 75.0, 47);
+    let mut points = Vec::new();
+    points.extend((0..75).map(|index| (index as f64, 0.0)));
+    points.extend((0..arc_segments).map(|index| {
+        let angle = -PI / 2.0 + PI * index as f64 / arc_segments as f64;
+        (
+            straight + radius * angle.cos(),
+            radius + radius * angle.sin(),
+        )
+    }));
+    points.extend((0..75).map(|index| (straight - index as f64, 2.0 * radius)));
+    points.extend((0..arc_segments).map(|index| {
+        let angle = PI / 2.0 + PI * index as f64 / arc_segments as f64;
+        (radius * angle.cos(), radius + radius * angle.sin())
+    }));
+    Track::from_points(points, 0.0).unwrap()
 }
 
 #[cfg(test)]

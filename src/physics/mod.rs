@@ -5,6 +5,7 @@ pub mod car_state_log;
 mod chassis;
 pub mod config;
 mod cornering;
+pub mod driver;
 mod environment;
 mod forces;
 mod integrators;

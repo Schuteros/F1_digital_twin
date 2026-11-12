@@ -8,6 +8,7 @@ use crate::physics::aero::Aero;
 use crate::physics::braking::Brakes;
 use crate::physics::car::{Car, Mass};
 use crate::physics::chassis::ChassisGeometry;
+use crate::physics::driver::Driver;
 use crate::physics::environment::Environment;
 use crate::physics::powertrain::Powertrain;
 use crate::physics::simulation::{EndCondition, SimulationConfig};
@@ -56,6 +57,8 @@ struct RunFile {
     /// Time step of the simulation in seconds, s
     #[serde(rename = "time_step_s")]
     time_step: f64,
+    /// How the driver plans the lap (docs/17). If missing, the driver has no grip margin.
+    driver: Option<Driver>,
     /// Starting conditions of the car at the start time. The calculated fields of `CarState`
     /// are not in the file, `SimulationConfig::prepare` fills them.
     initial_state: CarState,
@@ -130,12 +133,14 @@ pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
         },
         environment,
         track,
+        driver: run.driver.unwrap_or_default(),
         start_time: run.start_time,
         end_condition: run.end_condition,
         time_step: run.time_step,
         // Filled by prepare below
         static_values: StaticCarValues::default(),
         corner_speed_limits: Vec::new(),
+        target_speeds: Vec::new(),
     };
 
     simulation_config
@@ -928,5 +933,47 @@ mod tests {
             assert!((limit - 9.02).abs() < 0.005, "{}", limit);
         }
         assert!((loaded.initial_car_state.corner_speed_limit - 9.02).abs() < 0.005);
+    }
+
+    #[test]
+    fn test_driver_table_parses() {
+        // No [driver] table in the baseline run: no grip margin
+        let loaded = load_run(&baseline_run()).unwrap();
+        assert_eq!(loaded.driver, Driver::default());
+        assert_eq!(loaded.driver.grip_margin, 0.0);
+
+        // The oval run plans with a 5 % margin (docs/17 section 17.2)
+        let oval = load_run(&data_folder().join("runs").join("oval_3_laps.toml")).unwrap();
+        assert_eq!(oval.driver.grip_margin, 0.05);
+        assert_eq!(oval.target_speeds.len(), 244);
+        assert!((oval.corner_speed_limits[98] - 11.31).abs() < 0.005);
+
+        // Out of range and unknown keys are errors
+        let table = "[initial_state]";
+        let data = TempData::new("driver_margin_range");
+        data.replace(
+            "runs/baseline.toml",
+            table,
+            "[driver]\ngrip_margin = 1.0\n\n[initial_state]",
+        );
+        let message = load_run(&data.run()).unwrap_err();
+        assert!(
+            message.contains("driver.grip_margin must be in 0.0..1.0"),
+            "{}",
+            message
+        );
+
+        let data = TempData::new("driver_unknown_key");
+        data.replace(
+            "runs/baseline.toml",
+            table,
+            "[driver]\ngrip_margin = 0.05\nlook_ahead_m = 50.0\n\n[initial_state]",
+        );
+        let message = load_run(&data.run()).unwrap_err();
+        assert!(
+            message.contains("unknown field `look_ahead_m`"),
+            "{}",
+            message
+        );
     }
 }

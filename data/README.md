@@ -16,7 +16,7 @@ data/
   tracks/skidpad_circle.csv    XY points of one skidpad circle (docs/16)
   environments/standard.toml   air density and gravity
   runs/baseline.toml           picks the files above, time settings and start state
-  runs/oval_3_laps.toml        three laps of the oval
+  runs/oval_3_laps.toml        three laps of the oval, braking before the corners (docs/17)
   runs/skidpad_5_laps.toml     five laps of the skidpad circle
 ```
 
@@ -50,6 +50,7 @@ gives the same results as the code defaults.
 | `end_condition` | | When the run ends, one of the two forms below (it also stops when the car has braked to a stop) |
 | `curvature_smoothing_window_m` | m | Optional. Length the track curvature is averaged over, >= 0 (docs/15 section 15.5). `0.0` or missing = no smoothing. Only used by a track with XY points |
 | `time_step_s` | s | Time step. Must be > 0 and satisfy the suspension stability limit omega_max * time_step < 2 (docs/11 section 11.8) |
+| `[driver]` | table | Optional. How the driver plans the lap, see below. Only used by a track with XY points |
 
 `end_condition` (docs/15 section 15.8):
 
@@ -61,6 +62,12 @@ end_condition = { time_s = 30.0 }
 # Needs a track with XY points.
 end_condition = { laps = 3, max_time_s = 600.0 }
 ```
+
+`[driver]` (docs/17): optional. Without the table the driver plans exactly on the grip limit.
+
+| Key | Unit | Meaning |
+|---|---|---|
+| `grip_margin` | | Fraction of the tyre grip the driver leaves unused when planning corner speeds and braking points, 0.0 up to (not including) 1.0. `0.05` = plan with 5 % less grip, about 2.5 % less corner speed. `0.0` = on the limit. The simulated tyres keep their full grip, the difference is the reserve |
 
 `[initial_state]`: the starting conditions of the car at `start_time_s`.
 
@@ -83,7 +90,7 @@ end_condition = { laps = 3, max_time_s = 600.0 }
 The rest of the car state is not written in the file, because it follows from the values above
 and the car, track and environment. It is calculated before the run starts
 (`SimulationConfig::prepare`): the active braking zone and whether the car is braking (from
-`distance_m` and the track), the lap, position, curvature and corner speed limit on a track with XY points, the locked engine speed (from speed and gear, docs/12 equation 12.2)
+`distance_m` and the track), the lap, position, curvature, corner speed limit and target speed on a track with XY points, the locked engine speed (from speed and gear, docs/12 equation 12.2)
 and the acceleration. Writing one of them (e.g. `revs_hz`) is an unknown key error.
 
 ## Car file (`cars/*.toml`)
@@ -218,6 +225,8 @@ same place. Keep the spacing fairly even (about 1 m works well).
 
 From the points the distance to each point, the lap length and the curvature (positive for a left
 turn) are calculated when the file is loaded. The car gets a position, a lap counter and lap
-times. A track with XY points has no braking zones. The car speeds up to the corner speed limit
-of the point it is at and holds it (docs/16). It does not brake before a corner yet, so it can
-arrive too fast, and then brakes in the corner.
+times. A track with XY points has no braking zones. Before the run a corner speed limit
+(docs/16) and a target speed (docs/17) are calculated for every point. The car accelerates when it
+is below the target, brakes before each corner as late as it can to arrive at the corner speed,
+and holds the corner speed limit in the corner. The `[driver]` table of the run file sets how much
+grip the plan leaves unused.
