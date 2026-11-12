@@ -99,6 +99,17 @@ fn main() -> ExitCode {
             }
         }
 
+        // Braking points corrected by trial runs (docs/18 section 18.7)
+        if !config.braking_points.is_empty() {
+            println!("\nBraking points moved from the docs/17 plan (positive = earlier):");
+            for braking_point in &config.braking_points {
+                println!(
+                    "Corner at {:>8.2} m: {:+.2} m",
+                    braking_point.apex_distance, braking_point.shift
+                );
+            }
+        }
+
         if let EndCondition::Laps { laps, max_time } = config.end_condition
             && final_state.lap_times.len() < laps as usize
         {

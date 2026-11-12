@@ -36,12 +36,21 @@ pub struct Driver {
     /// Fraction of the tyre grip the driver leaves unused when planning corner speeds and
     /// braking (sigma), dimensionless, 0.0 up to but not including 1.0. 0 = plan exactly on
     /// the limit (docs/17 section 17.2).
+    #[serde(default)]
     pub grip_margin: f64,
+
+    /// Correct the braking points with trial runs of the full simulation before the run
+    /// (docs/18). false = the docs/17 plan as it is.
+    #[serde(default)]
+    pub braking_point_trials: bool,
 }
 
 impl Default for Driver {
     fn default() -> Self {
-        Self { grip_margin: 0.0 }
+        Self {
+            grip_margin: 0.0,
+            braking_point_trials: false,
+        }
     }
 }
 
@@ -269,7 +278,13 @@ mod tests {
 
     /// Default car with the planning tyre for `grip_margin`
     fn planning_tyre(grip_margin: f64) -> Tyre {
-        calculate_planning_tyre(&Tyre::default(), &Driver { grip_margin })
+        calculate_planning_tyre(
+            &Tyre::default(),
+            &Driver {
+                grip_margin,
+                ..Default::default()
+            },
+        )
     }
 
     /// Braking deceleration of `car` with `tyre` in the default environment

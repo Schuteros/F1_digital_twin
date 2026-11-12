@@ -141,6 +141,7 @@ pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
         static_values: StaticCarValues::default(),
         corner_speed_limits: Vec::new(),
         target_speeds: Vec::new(),
+        braking_points: Vec::new(),
     };
 
     simulation_config
@@ -975,5 +976,18 @@ mod tests {
             "{}",
             message
         );
+
+        // docs/18: braking_point_trials alone, without grip_margin (which is then 0)
+        let data = TempData::new("driver_trials");
+        data.replace(
+            "runs/baseline.toml",
+            table,
+            "[driver]\nbraking_point_trials = true\n\n[initial_state]",
+        );
+        let loaded = load_run(&data.run()).unwrap();
+        assert!(loaded.driver.braking_point_trials);
+        assert_eq!(loaded.driver.grip_margin, 0.0);
+        // A track with braking zones has no corners to correct
+        assert!(loaded.braking_points.is_empty());
     }
 }

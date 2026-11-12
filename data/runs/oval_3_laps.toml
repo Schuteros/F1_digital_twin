@@ -1,5 +1,6 @@
 # Three laps of the test oval (docs/15 section 15.9) with the baseline car.
-# The car brakes before each corner, as late as it can, to arrive at the corner speed (docs/17).
+# The car brakes before each corner, as late as it can, to arrive at the corner speed (docs/17),
+# with the braking points checked by trial runs of the full simulation (docs/18).
 # Start it with: cargo run -- data/runs/oval_3_laps.toml
 format_version = 1
 
@@ -27,6 +28,10 @@ time_step_s = 0.001
 # so the difference is a reserve. 0.0 = plans exactly on the limit, 0.05 = 5 % less grip,
 # about 2.5 % less corner speed. Must be 0.0 up to (not including) 1.0.
 grip_margin = 0.05
+# true = before the run, move each braking point earlier or later with trial runs of the full
+# simulation until the car gets through the corner without going over the limit (docs/18).
+# false or missing = the docs/17 plan as it is.
+braking_point_trials = true
 
 # Starting conditions of the car at start_time_s: on the start/finish line (distance 0),
 # already rolling at 10 m/s, in 1st gear, not shifting.

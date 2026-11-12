@@ -277,8 +277,10 @@ corner far too fast and could not have held the line.
 With $\sigma = 0.05$ the car reaches 24.3 m/s on the straight and starts braking 25 m before the
 corner, at up to 10.2 m/s² (1.04 g).
 
-With $\sigma = 0$ the car goes over the limit for a moment each time the braking starts, for the
-reason in section 17.9. On this car and track a margin of 1 % is already enough to prevent it. The
+With $\sigma = 0$ the car goes over the limit for a moment at each corner entry, in the first metre
+after the braking ends, for the reason in section 17.9: the nose is still down from the braking,
+so the rear tyres have less grip than planned just when the corner needs all of it (docs/18
+corrects this). On this car and track a margin of 1 % is already enough to prevent it. The
 rest of a larger margin is reserve.
 
 ---
@@ -287,8 +289,9 @@ rest of a larger margin is reserve.
 
 [!WARNING]
 The plan assumes the braking load transfer is there at once (17.4). The simulated car has to pitch
-first, which takes about 0.1 s, so at the first moment of braking it has a little less grip than
-planned. The grip margin has to cover this. The plan is made once and never changed: no learning
+first, which takes about 0.1 s, so it falls a little behind the plan when the braking starts, and
+when the braking ends the nose is still down and the rear has less grip than planned at the corner
+entry. The grip margin has to cover this. The plan is made once and never changed: no learning
 from lap to lap and no reaction to what the car actually does. The margin is one number for the
 whole lap. The line is fixed, so the car cannot use the track width to make a corner wider. Gear
 shifts, and the moment without drive during them, are not in the plan.

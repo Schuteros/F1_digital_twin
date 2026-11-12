@@ -1,6 +1,6 @@
 # F1 Digital Twin Simulator For Design Validation
 
-Physics simulation of a Formula 1 car in progress. In reality, it is not limited to just F1 cars, but any type of car with 4 wheels. Current version 0.11.0.
+Physics simulation of a Formula 1 car in progress. In reality, it is not limited to just F1 cars, but any type of car with 4 wheels. Current version 0.12.0.
 
 ---
 
@@ -8,8 +8,9 @@ Physics simulation of a Formula 1 car in progress. In reality, it is not limited
 
 * **Goal:** We are using Rust programming language code to simulate 2D motion of F1 car.
 * **Current Phase:** We have made a simulation that can simulate 1D motion acceleration with simplified models
-* **Latest Milestone (0.11.0):** Look-ahead braking (docs/17): on a track with XY points the car now brakes before a corner, as late as it can, to arrive at the corner speed. Before the run a target speed is calculated for every track point: going backwards through the points, each one may be no faster than the speed from which the car can still brake down to the next one (v² = v_next² + 2·a·Δs), with the deceleration the car has there (downforce, drag, load transfer, friction ellipse, the docs/14 tyre model). During the run the driver only follows the stored target. A new optional run file table `[driver]` with `grip_margin` makes the driver plan with a little less grip than the tyres have, so the car keeps a reserve. The plan is fixed: no learning between laps. The baseline and skidpad results are unchanged
-* **Previous Milestone (0.10.0):** Steady-state cornering (docs/16): on a track with XY points the car needs the lateral force m·v²·|κ|, shared between the axles like the static weight. Each tyre's share goes into the friction ellipse, so traction and braking are weaker in a corner. Before the run a corner speed limit is calculated for every track point with the docs/14 tyre model (load sensitivity included). The driver asks for the acceleration that brings the car to the limit and gets as much of it as the car can give. The car has no lateral load transfer yet. The baseline results are unchanged
+* **Latest Milestone (0.12.0):** Braking points from trial runs (docs/18): with `braking_point_trials = true` in the run file's `[driver]` table, every braking point of the docs/17 plan is checked with the full simulation before the run. From the state saved at the exit of the previous corner, the car drives to the exit of the next one; if it goes over the grip limit the braking point moves earlier, if it has grip to spare it moves later (halving to 1 cm), lap after lap until nothing changes. The trial car has the planning tyre, so the margin stays a reserve. On the test oval the braking points move 0.98 m earlier and the car without a margin is never over the limit any more. Nothing is added to the time step
+* **Previous Milestone (0.11.0):** Look-ahead braking (docs/17): on a track with XY points the car now brakes before a corner, as late as it can, to arrive at the corner speed. Before the run a target speed is calculated for every track point: going backwards through the points, each one may be no faster than the speed from which the car can still brake down to the next one (v² = v_next² + 2·a·Δs), with the deceleration the car has there (downforce, drag, load transfer, friction ellipse, the docs/14 tyre model). During the run the driver only follows the stored target. A new optional run file table `[driver]` with `grip_margin` makes the driver plan with a little less grip than the tyres have, so the car keeps a reserve. The plan is fixed: no learning between laps. The baseline and skidpad results are unchanged
+* **Earlier (0.10.0):** Steady-state cornering (docs/16): on a track with XY points the car needs the lateral force m·v²·|κ|, shared between the axles like the static weight. Each tyre's share goes into the friction ellipse, so traction and braking are weaker in a corner. Before the run a corner speed limit is calculated for every track point with the docs/14 tyre model (load sensitivity included). The driver asks for the acceleration that brings the car to the limit and gets as much of it as the car can give. The car has no lateral load transfer yet. The baseline results are unchanged
 * **Earlier (0.9.0):** XY track, curvature and laps (docs/15): a track file can now hold the `x_m,y_m` points of the line the car drives. Before the run, the distance to each point, the lap length and the smoothed curvature are calculated. During the run the car has a position, a curvature, a lap counter and lap times (crossing time interpolated inside the step), and a run can end at a time or after a number of laps (`end_condition`). The car does not slow down for corners yet, and the baseline results are unchanged
 * **Earlier (0.8.0):** Tyre load sensitivity and the friction ellipse (docs/14): mu falls linearly with the tyre load, the grip is calculated per tyre from the four corner loads and summed per axle, and the longitudinal grip left over from a lateral force follows the friction ellipse (lateral force is 0 until cornering arrives). The baseline tyre has no load sensitivity, so the baseline results are unchanged
 * **Earlier (0.7.0):** Aerodynamic downforce and pressure points (docs/13): downforce acts at a centre of pressure measured from the front axle and drag acts at its own height, both fixed for now. They feed the body heave and pitch equations, so the springs carry them to the four tyre loads and the ride heights
@@ -62,7 +63,7 @@ data/
   tracks/skidpad_circle.csv    XY points of one skidpad circle, 9.125 m radius (docs/16)
   environments/standard.toml   air density, gravity
   runs/baseline.toml           picks the files above + time settings + initial state
-  runs/oval_3_laps.toml        three laps of the oval, ends on laps, driver with a 5 % grip margin (docs/17)
+  runs/oval_3_laps.toml        three laps of the oval, ends on laps, driver with a 5 % grip margin (docs/17) and braking point trials (docs/18)
   runs/skidpad_5_laps.toml     five laps of the skidpad circle
   README.md                    what each file is, every key with its unit
 ```
@@ -98,7 +99,9 @@ no tyre needs more lateral force than it has, found by halving the search range)
 speed at every point (`calculate_target_speeds`, docs/17 section 17.5: the backward pass over the corner speed limits,
 twice around the lap, with `calculate_braking_deceleration` for each segment). Both are calculated with the planning
 tyre (`calculate_planning_tyre`, docs/17 equation 17.1: both friction coefficients times 1 - `grip_margin`). The
-simulation itself uses the real tyre.
+simulation itself uses the real tyre. With `driver.braking_point_trials`, the braking points are then corrected with trial
+runs of the full simulation (`correct_braking_points`, docs/18 section 18.7), which changes `target_speeds` and fills
+`braking_points`, and the starting car state is calculated once more with the new targets.
 Last, it calculates the part of the starting car state that follows from the starting conditions and the config
 (`calculate_initial_car_state`): active braking zone, braking flag, lap, track segment, position, curvature (docs/15), corner speed limit (docs/16) and target speed (docs/17), lateral acceleration, locked engine speed `revs_hz` and acceleration.
 The first step recalculates them the same way, so they don't change the results. `load_run` calls `prepare()` when the

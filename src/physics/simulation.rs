@@ -1,4 +1,5 @@
 use crate::physics::aero::{AeroLoads, calculate_aero_loads};
+use crate::physics::braking_points::{BrakingPoint, correct_braking_points};
 use crate::physics::car::Car;
 use crate::physics::car_state_log::CarStateLog;
 use crate::physics::chassis::calculate_axle_distances;
@@ -145,6 +146,10 @@ pub struct SimulationConfig {
     /// speed limits lowered before each corner so the car can brake down to them (docs/17
     /// section 17.5). Empty like `corner_speed_limits`, filled by `prepare`.
     pub(crate) target_speeds: Vec<f64>,
+
+    /// The braking point of every corner found by trial runs (docs/18), in driving order.
+    /// Empty without `driver.braking_point_trials`, filled by `prepare`.
+    pub braking_points: Vec<BrakingPoint>,
 }
 
 impl Default for SimulationConfig {
@@ -161,12 +166,13 @@ impl Default for SimulationConfig {
             static_values: StaticCarValues::default(),
             corner_speed_limits: Vec::new(),
             target_speeds: Vec::new(),
+            braking_points: Vec::new(),
         }
     }
 }
 
 /// Holds all the values needed for the simulation
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SimulationState {
     pub(crate) car: CarState,
     pub(crate) time: f64, // Seconds (s)
@@ -271,7 +277,10 @@ pub fn start_simulation(
 }
 
 /// Simulation step updates simulation runner
-fn simulation_step(simulation_state: &mut SimulationState, simulation_config: &SimulationConfig) {
+pub(crate) fn simulation_step(
+    simulation_state: &mut SimulationState,
+    simulation_config: &SimulationConfig,
+) {
     simulation_state.car.active_braking_zone = find_active_braking_zone(
         simulation_state.car.distance,
         &simulation_config.track.braking_zones,
@@ -637,6 +646,14 @@ impl SimulationConfig {
 
         // The acceleration needs the values above, so they are filled first
         self.initial_car_state = calculate_initial_car_state(self);
+
+        // docs/18: braking points corrected with trial runs of the full simulation, which
+        // start from the initial car state. Then the initial state again with the new targets.
+        self.braking_points = Vec::new();
+        if self.driver.braking_point_trials && self.track.has_line() {
+            self.braking_points = correct_braking_points(self)?;
+            self.initial_car_state = calculate_initial_car_state(self);
+        }
 
         Ok(())
     }
@@ -2685,7 +2702,10 @@ mod tests {
     fn oval_config(grip_margin: f64) -> SimulationConfig {
         prepared(SimulationConfig {
             track: oval_track(),
-            driver: Driver { grip_margin },
+            driver: Driver {
+                grip_margin,
+                ..Default::default()
+            },
             initial_car_state: CarState {
                 distance: 0.0,
                 ..CarState::default()
@@ -2805,7 +2825,10 @@ mod tests {
     fn test_invalid_grip_margin_rejected() {
         for grip_margin in [-0.01, 1.0, 1.5, f64::NAN] {
             let simulation_config = SimulationConfig {
-                driver: Driver { grip_margin },
+                driver: Driver {
+                    grip_margin,
+                    ..Default::default()
+                },
                 ..SimulationConfig::default()
             };
             let message = simulation_config.validate().unwrap_err();
@@ -2814,7 +2837,10 @@ mod tests {
         // 0 and just below 1 are allowed
         for grip_margin in [0.0, 0.99] {
             let simulation_config = SimulationConfig {
-                driver: Driver { grip_margin },
+                driver: Driver {
+                    grip_margin,
+                    ..Default::default()
+                },
                 ..SimulationConfig::default()
             };
             assert!(simulation_config.validate().is_ok());

@@ -1,5 +1,6 @@
 mod aero;
 pub mod braking;
+mod braking_points;
 mod car;
 pub mod car_state_log;
 mod chassis;
