@@ -17,6 +17,25 @@ pub struct ChassisGeometry {
     /// Height of the centre of gravity above the ground in meters, m
     #[serde(rename = "cog_height_m")]
     pub cog_height: f64,
+    /// Distance between the left and right front contact patch centres (b_f) in meters, m
+    /// (docs/19)
+    #[serde(rename = "front_track_width_m")]
+    pub front_track_width: f64,
+    /// Distance between the left and right rear contact patch centres (b_r) in meters, m
+    /// (docs/19)
+    #[serde(rename = "rear_track_width_m")]
+    pub rear_track_width: f64,
+}
+
+/// Frame (chassis) between the front and the rear axle (docs/19 section 19.8). Optional in the
+/// car file: without it the frame is rigid.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Frame {
+    /// Torsional stiffness of the frame between the front and the rear axle (K_ch) in Newton
+    /// meters per radian, N·m/rad
+    #[serde(rename = "torsional_stiffness_N_m_per_rad")]
+    pub torsional_stiffness: f64,
 }
 
 impl Default for ChassisGeometry {
@@ -25,6 +44,8 @@ impl Default for ChassisGeometry {
             // Placeholder values: verify against current F1 regulations / sources
             wheelbase: 3.4,
             cog_height: 0.3,
+            front_track_width: 1.6,
+            rear_track_width: 1.6,
         }
     }
 }
@@ -91,6 +112,7 @@ mod tests {
         let geometry = ChassisGeometry {
             wheelbase: 3.0,
             cog_height: 0.3,
+            ..ChassisGeometry::default()
         };
         let distances = calculate_axle_distances(&mass, &geometry);
         assert!((distances.front - 1.8).abs() < 1e-12);

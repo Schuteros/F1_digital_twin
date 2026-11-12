@@ -9,6 +9,7 @@ use crate::physics::car::Car;
 use crate::physics::chassis::AxleDistances;
 use crate::physics::environment::Environment;
 use crate::physics::loads::{AxleLoads, calculate_static_axle_loads};
+use crate::physics::roll::{calculate_steady_state_lateral_transfer, split_axle_loads};
 use crate::physics::suspension::CornerLoads;
 use crate::physics::track::Track;
 use crate::physics::tyres::{Tyre, calculate_max_tyre_force};
@@ -27,21 +28,22 @@ const SEARCH_HALVINGS: u32 = 60;
 /// as over the limit every few steps.
 pub(crate) const OVER_GRIP_LIMIT_MARGIN: f64 = 1e-4;
 
-/// Lateral force each axle has to make in Newtons, N (docs/16, equation 16.4).
-/// Each tyre of an axle makes half of it.
+/// Lateral force each axle has to make in Newtons, N (docs/16, equation 16.4), positive to the
+/// left like a_y (docs/19 section 19.1). The two tyres of an axle share it so both use the same
+/// fraction of their own lateral grip (docs/19 section 19.9).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct AxleLateralForces {
-    /// Front axle lateral force (F_y,f) in Newtons, N, >= 0
+    /// Front axle lateral force (F_y,f) in Newtons, N
     pub front: f64,
-    /// Rear axle lateral force (F_y,r) in Newtons, N, >= 0
+    /// Rear axle lateral force (F_y,r) in Newtons, N
     pub rear: f64,
 }
 
 /// Calculates the lateral acceleration in m/s^2 a car needs to follow a line of curvature
-/// `curvature` in 1/m at `speed` in m/s: a_y = v^2 * |kappa| (docs/16, equation 16.1).
-/// Always >= 0, the side of the corner does not matter.
+/// `curvature` in 1/m at `speed` in m/s: a_y = v^2 * kappa (docs/16, equation 16.1). Positive
+/// to the left like the curvature, so positive in a left turn (docs/19 section 19.1).
 pub(crate) fn calculate_lateral_acceleration(speed: f64, curvature: f64) -> f64 {
-    speed * speed * curvature.abs()
+    speed * speed * curvature
 }
 
 /// Calculates the lateral force of each axle in Newtons, N, for the lateral acceleration
@@ -62,8 +64,10 @@ pub(crate) fn calculate_axle_lateral_forces(
     }
 }
 
-/// Checks if any tyre needs more lateral force than it can make at its load (docs/16 section
-/// 16.4, docs/14 equation 14.4). Each tyre makes half of its axle's lateral force.
+/// Checks if an axle needs more lateral force than its two tyres can make together at their
+/// loads (docs/16 section 16.4, docs/14 equation 14.4). Both tyres use the same fraction of
+/// their own lateral grip (docs/19, equation 19.24), so an axle is over the limit exactly when
+/// that fraction is above 1.
 ///
 /// * `margin` - fraction above the limit that still counts as on the limit, dimensionless, 0 = none
 pub(crate) fn is_over_lateral_grip(
@@ -72,15 +76,21 @@ pub(crate) fn is_over_lateral_grip(
     axle_lateral_forces: &AxleLateralForces,
     margin: f64,
 ) -> bool {
-    let is_over = |tyre_load: f64, axle_lateral_force: f64| {
-        let max_lateral = calculate_max_tyre_force(tyre, tyre.mu_y_ref, tyre_load);
-        0.5 * axle_lateral_force > max_lateral * (1.0 + margin)
+    let is_over = |load_left: f64, load_right: f64, axle_lateral_force: f64| {
+        let max_lateral = calculate_max_tyre_force(tyre, tyre.mu_y_ref, load_left)
+            + calculate_max_tyre_force(tyre, tyre.mu_y_ref, load_right);
+        axle_lateral_force.abs() > max_lateral * (1.0 + margin)
     };
 
-    is_over(tyre_loads.front_left, axle_lateral_forces.front)
-        || is_over(tyre_loads.front_right, axle_lateral_forces.front)
-        || is_over(tyre_loads.rear_left, axle_lateral_forces.rear)
-        || is_over(tyre_loads.rear_right, axle_lateral_forces.rear)
+    is_over(
+        tyre_loads.front_left,
+        tyre_loads.front_right,
+        axle_lateral_forces.front,
+    ) || is_over(
+        tyre_loads.rear_left,
+        tyre_loads.rear_right,
+        axle_lateral_forces.rear,
+    )
 }
 
 /// Calculates the axle loads in Newtons, N, of a car that holds `speed` in m/s: the static
@@ -111,7 +121,8 @@ pub(crate) fn calculate_constant_speed_axle_loads(
 }
 
 /// Checks if the tyres can hold a corner of `curvature` in 1/m at a constant `speed` in m/s:
-/// no tyre needs more lateral force than it can make (docs/16 section 16.5, steps 1 to 3)
+/// no axle needs more lateral force than its tyres can make (docs/16 section 16.5, steps 1 to
+/// 3), with the tyre loads after the settled lateral load transfer (docs/19 section 19.9)
 fn can_hold_corner(
     car: &Car,
     tyre: &Tyre,
@@ -121,17 +132,13 @@ fn can_hold_corner(
     speed: f64,
 ) -> bool {
     let axle_loads = calculate_constant_speed_axle_loads(car, environment, axle_distances, speed);
-    let tyre_loads = CornerLoads {
-        front_left: 0.5 * axle_loads.front,
-        front_right: 0.5 * axle_loads.front,
-        rear_left: 0.5 * axle_loads.rear,
-        rear_right: 0.5 * axle_loads.rear,
-    };
-    let axle_lateral_forces = calculate_axle_lateral_forces(
-        car.mass.total,
-        calculate_lateral_acceleration(speed, curvature),
-        axle_distances,
+    let lateral_acceleration = calculate_lateral_acceleration(speed, curvature);
+    let tyre_loads = split_axle_loads(
+        &axle_loads,
+        &calculate_steady_state_lateral_transfer(car, axle_distances, lateral_acceleration),
     );
+    let axle_lateral_forces =
+        calculate_axle_lateral_forces(car.mass.total, lateral_acceleration, axle_distances);
 
     !is_over_lateral_grip(tyre, &tyre_loads, &axle_lateral_forces, 0.0)
 }
@@ -295,10 +302,10 @@ mod tests {
         let car = Car::default();
         let lateral_acceleration = calculate_lateral_acceleration(10.0, 1.0 / 15.0);
         assert!((lateral_acceleration - 6.666666667).abs() < 1e-9);
-        // A right corner needs the same
+        // A right corner needs the same size, pointing the other way (docs/19 section 19.1)
         assert_eq!(
             calculate_lateral_acceleration(10.0, -1.0 / 15.0),
-            lateral_acceleration
+            -lateral_acceleration
         );
 
         // 50/50 car: 2718.3 N per axle (docs/16 section 16.3)
@@ -429,8 +436,10 @@ mod tests {
     #[test]
     fn test_corner_speed_limit_with_load_sensitivity() {
         // docs/16 section 16.6: with lambda > 0 the search matches 16.15 solved as a quadratic,
-        // and the balance flips between 15 m and 30 m
-        let car = balance_flip_car();
+        // and the balance flips between 15 m and 30 m. 16.15 has no lateral load transfer, so
+        // the CoG goes on the ground for the comparison: m * a_y * h / b = 0 (docs/19, 19.1).
+        let mut car = balance_flip_car();
+        car.geometry.cog_height = 0.0;
         let environment = Environment::default();
         let (q_front, q_rear) = aero_load_gains_per_kilogram(&car, &environment);
         assert!((q_front - 0.00192).abs() < 1e-5 && (q_rear - 0.00105).abs() < 1e-5);
@@ -518,6 +527,26 @@ mod tests {
             &forces(3601.0, 0.0),
             1e-4
         ));
+        // docs/19 section 19.9 example: 1388 N and 2612 N can hold 3262 N together (limits 1249 N
+        // and 2351 N), although half of it is more than the inside tyre could make alone
+        let transferred = CornerLoads {
+            front_left: 1388.0,
+            front_right: 2612.0,
+            rear_left: 2000.0,
+            rear_right: 2000.0,
+        };
+        assert!(!is_over_lateral_grip(
+            &tyre,
+            &transferred,
+            &forces(3262.0, 0.0),
+            0.0
+        ));
+        assert!(is_over_lateral_grip(
+            &tyre,
+            &transferred,
+            &forces(-3601.0, 0.0),
+            0.0
+        ));
         // A straight is never over the limit, even with a lifted wheel
         let lifted = CornerLoads::default();
         assert!(!is_over_lateral_grip(
@@ -526,6 +555,32 @@ mod tests {
             &forces(0.0, 0.0),
             0.0
         ));
+    }
+
+    #[test]
+    fn test_lateral_load_transfer_lowers_limit() {
+        // docs/19 section 19.9: with lambda = 0 the transfer changes nothing, with lambda > 0
+        // it costs grip, and a stiffer front bar costs the front-limited baseline car more
+        let constant_mu = Car::default();
+        let mut flat = Car::default();
+        flat.geometry.cog_height = 0.0;
+        assert!((limit(&constant_mu, 1.0 / 15.0) - limit(&flat, 1.0 / 15.0)).abs() < 1e-9);
+
+        let mut sensitive = Car::default();
+        sensitive.tyre.load_sensitivity = 0.2;
+        let mut sensitive_flat = Car::default();
+        sensitive_flat.tyre.load_sensitivity = 0.2;
+        sensitive_flat.geometry.cog_height = 0.0;
+        let with_transfer = limit(&sensitive, 1.0 / 15.0);
+        assert!(with_transfer < limit(&sensitive_flat, 1.0 / 15.0) - 0.01);
+
+        sensitive.suspension.front_anti_roll_bar_stiffness = 300_000.0;
+        assert!(limit(&sensitive, 1.0 / 15.0) < with_transfer - 0.01);
+        // Left and right corners are the same
+        assert_eq!(
+            limit(&sensitive, 1.0 / 15.0),
+            limit(&sensitive, -1.0 / 15.0)
+        );
     }
 
     #[test]

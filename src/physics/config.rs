@@ -7,7 +7,7 @@
 use crate::physics::aero::Aero;
 use crate::physics::braking::Brakes;
 use crate::physics::car::{Car, Mass};
-use crate::physics::chassis::ChassisGeometry;
+use crate::physics::chassis::{ChassisGeometry, Frame};
 use crate::physics::driver::Driver;
 use crate::physics::environment::Environment;
 use crate::physics::powertrain::Powertrain;
@@ -83,8 +83,10 @@ struct CarFile {
     brakes: Brakes,
     /// Engine, gearbox and drivetrain
     powertrain: Powertrain,
-    /// Springs, dampers, end stops and pitch inertia
+    /// Springs, dampers, end stops, anti-roll bars, roll centres and body inertias
     suspension: Suspension,
+    /// Frame torsional stiffness (docs/19 section 19.8). Missing = rigid frame.
+    frame: Option<Frame>,
 }
 
 /// Just the version key of a TOML data file. The other keys are ignored here, they are
@@ -130,6 +132,7 @@ pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
             geometry: car.geometry,
             brakes: car.brakes,
             suspension: car.suspension,
+            frame: car.frame,
         },
         environment,
         track,
@@ -768,6 +771,54 @@ mod tests {
         let message = load_run(&data.run()).unwrap_err();
         assert!(
             message.contains("unknown field `front_torque_split`"),
+            "{}",
+            message
+        );
+    }
+
+    #[test]
+    fn test_frame_and_optional_roll_keys() {
+        // docs/19 section 19.12: the baseline car has a rigid frame (no [frame] table)
+        let baseline = load_run(&baseline_run()).unwrap();
+        assert_eq!(baseline.car.frame, None);
+
+        let data = TempData::new("frame_table");
+        // Line by line, so the test works with either line ending
+        data.replace("cars/baseline.toml", "# [frame]", "[frame]");
+        data.replace(
+            "cars/baseline.toml",
+            "# torsional_stiffness_N_m_per_rad",
+            "torsional_stiffness_N_m_per_rad",
+        );
+        let config = load_run(&data.run()).unwrap();
+        assert_eq!(
+            config.car.frame,
+            Some(Frame {
+                torsional_stiffness: 100_000.0
+            })
+        );
+
+        // Roll centres, bars and the starting roll are optional, 0 when missing
+        let data = TempData::new("optional_roll_keys");
+        data.replace("cars/baseline.toml", "front_roll_centre_height_m = 0.0", "");
+        data.replace(
+            "cars/baseline.toml",
+            "front_anti_roll_bar_stiffness_N_m_per_rad = 0.0",
+            "",
+        );
+        data.replace("runs/baseline.toml", "roll_front_rad = 0.0", "");
+        data.replace("runs/baseline.toml", "roll_rear_rad = 0.0", "");
+        let config = load_run(&data.run()).unwrap();
+        assert_eq!(config.car.suspension.front_roll_centre_height, 0.0);
+        assert_eq!(config.car.suspension.front_anti_roll_bar_stiffness, 0.0);
+        assert_eq!(config.initial_car_state.suspension.roll_front, 0.0);
+
+        // The track widths are required
+        let data = TempData::new("missing_track_width");
+        data.replace("cars/baseline.toml", "front_track_width_m = 1.6", "");
+        let message = load_run(&data.run()).unwrap_err();
+        assert!(
+            message.contains("missing field `front_track_width_m`"),
             "{}",
             message
         );

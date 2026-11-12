@@ -79,6 +79,10 @@ The left and right tyre of an axle each make half of the axle force. In a real c
 from the inside to the outside tyre (lateral load transfer) and the outside tyre does more of the
 work. That is left out here, see section 16.10.
 
+*Since 0.13.0 (docs/19):* lateral load transfer is in the model, $a_y$ is signed (+ in a left turn)
+and the two tyres of an axle share the force so that both use the same fraction of their own grip
+(docs/19 equation 19.24). With equal tyre loads this is the same as half each.
+
 ---
 
 ## 16.4. Grip Check and What Is Left for Driving and Braking

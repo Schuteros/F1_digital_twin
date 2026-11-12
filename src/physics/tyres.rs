@@ -73,22 +73,39 @@ pub(crate) struct AxleGrip {
 /// between the left and right tyre is kept (docs/14 sections 14.3 and 14.5).
 ///
 /// `axle_lateral_forces` are the lateral forces the corner needs from each axle (docs/16,
-/// equation 16.4). Each tyre makes half of its axle's force, and the friction ellipse gives
-/// the longitudinal force that is left (docs/16 section 16.4). 0 on a straight.
+/// equation 16.4). The two tyres of an axle share it so both use the same fraction of their
+/// own lateral grip (docs/19, equation 19.24), and the friction ellipse gives the longitudinal
+/// force each tyre has left (docs/16 section 16.4). With equal loads each tyre makes half.
+/// 0 lateral force on a straight.
 pub(crate) fn calculate_axle_grip(
     tyre: &Tyre,
     tyre_loads: &CornerLoads,
     axle_lateral_forces: &AxleLateralForces,
 ) -> AxleGrip {
-    let tyre_grip = |tyre_load: f64, axle_lateral_force: f64| {
-        calculate_available_longitudinal_force(tyre, tyre_load, 0.5 * axle_lateral_force)
+    let axle_grip = |load_left: f64, load_right: f64, axle_lateral_force: f64| {
+        let max_left = calculate_max_tyre_force(tyre, tyre.mu_y_ref, load_left);
+        let max_right = calculate_max_tyre_force(tyre, tyre.mu_y_ref, load_right);
+        // (19.24): the fraction of its lateral grip each tyre uses, 0 on a straight
+        let usage = if axle_lateral_force == 0.0 {
+            0.0
+        } else {
+            axle_lateral_force.abs() / (max_left + max_right)
+        };
+        calculate_available_longitudinal_force(tyre, load_left, usage * max_left)
+            + calculate_available_longitudinal_force(tyre, load_right, usage * max_right)
     };
 
     AxleGrip {
-        front: tyre_grip(tyre_loads.front_left, axle_lateral_forces.front)
-            + tyre_grip(tyre_loads.front_right, axle_lateral_forces.front),
-        rear: tyre_grip(tyre_loads.rear_left, axle_lateral_forces.rear)
-            + tyre_grip(tyre_loads.rear_right, axle_lateral_forces.rear),
+        front: axle_grip(
+            tyre_loads.front_left,
+            tyre_loads.front_right,
+            axle_lateral_forces.front,
+        ),
+        rear: axle_grip(
+            tyre_loads.rear_left,
+            tyre_loads.rear_right,
+            axle_lateral_forces.rear,
+        ),
     }
 }
 

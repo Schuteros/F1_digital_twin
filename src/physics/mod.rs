@@ -12,6 +12,7 @@ mod forces;
 mod integrators;
 mod loads;
 mod powertrain;
+mod roll;
 pub(crate) mod simulation;
 mod states;
 mod suspension;

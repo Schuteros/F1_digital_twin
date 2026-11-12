@@ -104,6 +104,13 @@ end_condition = { laps = 3, max_time_s = 600.0 }
 | `heave_velocity_m_per_s` | m/s | Heave velocity, positive down |
 | `pitch_rad` | rad | Body rotation from static, positive nose down |
 | `pitch_rate_rad_per_s` | rad/s | Pitch rate, positive nose down |
+| `roll_front_rad` | rad | Roll of the front of the body, positive right side down (docs/19) |
+| `roll_rear_rad` | rad | Roll of the rear of the body, positive right side down |
+| `roll_rate_front_rad_per_s` | rad/s | Front roll rate, positive right side down |
+| `roll_rate_rear_rad_per_s` | rad/s | Rear roll rate, positive right side down |
+
+The roll keys are optional (missing = `0.0`). Without a `[frame]` table in the car file the frame
+is rigid, so front and rear roll (and roll rates) must be equal.
 
 The rest of the car state is not written in the file, because it follows from the values above
 and the car, track and environment. It is calculated before the run starts
@@ -126,12 +133,14 @@ and the acceleration. Writing one of them (e.g. `revs_hz`) is an unknown key err
 | `front_kg` | kg | Mass on the front axle |
 | `rear_kg` | kg | Mass on the rear axle. `front_kg + rear_kg` must equal `total_kg` |
 
-`[geometry]` (docs/10)
+`[geometry]` (docs/10, docs/19)
 
 | Key | Unit | Meaning |
 |---|---|---|
 | `wheelbase_m` | m | Distance between the front and rear axle, > 0 |
 | `cog_height_m` | m | Height of the centre of gravity above the ground, >= 0 |
+| `front_track_width_m` | m | Distance between the centres of the front tyre contact patches, > 0 |
+| `rear_track_width_m` | m | Distance between the centres of the rear tyre contact patches, > 0 |
 
 `[aero]` (docs/04, docs/13)
 
@@ -172,13 +181,18 @@ calculated from the torque curve, gearing and wheel radius before the simulation
 | `type` | | `"rear_wheel_drive"`, `"front_wheel_drive"` or `"all_wheel_drive"` |
 | `front_torque_split` | | Only with `"all_wheel_drive"`, and required there. Fraction of the drive force on the front axle, 0..=1 |
 
-`[suspension]` (docs/11)
+`[suspension]` (docs/11, docs/19)
 
 | Key | Unit | Meaning |
 |---|---|---|
 | `pitch_inertia_kg_m2` | kg·m² | Pitch moment of inertia of the body about its CoG, > 0 |
 | `static_ride_height_front_m` | m | Front ride height standing still on level ground |
 | `static_ride_height_rear_m` | m | Rear ride height standing still on level ground |
+| `roll_inertia_kg_m2` | kg·m² | Roll moment of inertia of the body about a horizontal axis through its CoG, > 0 |
+| `front_roll_centre_height_m` | m | Optional, default `0.0`. Front roll centre height above the ground (docs/19 section 19.3) |
+| `rear_roll_centre_height_m` | m | Optional, default `0.0`. Rear roll centre height above the ground |
+| `front_anti_roll_bar_stiffness_N_m_per_rad` | N·m/rad | Optional, default `0.0` (no bar). Roll stiffness the front bar adds, measured at the wheels, >= 0 (docs/19 section 19.4) |
+| `rear_anti_roll_bar_stiffness_N_m_per_rad` | N·m/rad | Optional, default `0.0` (no bar). Same for the rear bar |
 
 `[suspension.front_left]`, `[suspension.front_right]`, `[suspension.rear_left]`,
 `[suspension.rear_right]`: one corner each, all values measured at the wheel.
@@ -191,6 +205,13 @@ calculated from the torque curve, gearing and wheel radius before the simulation
 | `bump_rate_N_per_m` | N/m | Bump stop stiffness, >= 0 |
 | `droop_gap_m` | m | Extension from static before the droop limiter engages, >= 0 |
 | `droop_rate_N_per_m` | N/m | Droop stop stiffness, >= 0 |
+
+`[frame]` (docs/19 section 19.8): optional. Without it the frame is rigid and the body rolls as one piece.
+With it the front and rear halves of the body roll separately, joined by a torsion spring.
+
+| Key | Unit | Meaning |
+|---|---|---|
+| `torsional_stiffness_N_m_per_rad` | N·m/rad | Torsional stiffness of the frame between the axles, > 0. From N·m/deg multiply by 57.3 |
 
 ## Tyre file (`tyres/*.toml`) (docs/03, docs/14)
 

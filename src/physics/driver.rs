@@ -12,7 +12,8 @@ use crate::physics::cornering::{
     calculate_lateral_acceleration,
 };
 use crate::physics::environment::Environment;
-use crate::physics::suspension::CornerLoads;
+use crate::physics::loads::AxleLoads;
+use crate::physics::roll::{calculate_steady_state_lateral_transfer, split_axle_loads};
 use crate::physics::track::{Track, find_track_segment};
 use crate::physics::tyres::{Tyre, calculate_axle_grip, calculate_current_tyre_friction};
 use serde::Deserialize;
@@ -72,7 +73,8 @@ pub(crate) fn calculate_planning_tyre(tyre: &Tyre, driver: &Driver) -> Tyre {
 
 /// Calculates the deceleration in m/s^2 (positive when slowing down) the car can reach at
 /// `speed` in m/s on a line of `curvature` in 1/m, with the tyre `tyre` (docs/17 section 17.4):
-/// 1. axle loads at constant speed plus the load braking moves to the front (17.4),
+/// 1. axle loads at constant speed plus the load braking moves to the front (17.4), split
+///    between the left and right tyre with the settled lateral load transfer (docs/19),
 /// 2. the longitudinal grip left after the lateral force the corner needs (friction ellipse),
 /// 3. the brake force for the fixed brake bias,
 /// 4. deceleration from brake force, drag and rolling resistance (17.5).
@@ -92,11 +94,11 @@ pub(crate) fn calculate_braking_deceleration(
     let drag = calculate_aero_loads(&car.aero, environment.air_density, speed).drag;
     let rolling_resistance =
         calculate_current_tyre_friction(total_load, tyre.mu_rolling, tyre.mu_breakaway, speed);
-    let axle_lateral_forces = calculate_axle_lateral_forces(
-        car.mass.total,
-        calculate_lateral_acceleration(speed, curvature),
-        axle_distances,
-    );
+    let lateral_acceleration = calculate_lateral_acceleration(speed, curvature);
+    let axle_lateral_forces =
+        calculate_axle_lateral_forces(car.mass.total, lateral_acceleration, axle_distances);
+    let lateral_transfer =
+        calculate_steady_state_lateral_transfer(car, axle_distances, lateral_acceleration);
     let wheelbase = axle_distances.front + axle_distances.rear;
 
     let mut deceleration = 0.0;
@@ -106,12 +108,13 @@ pub(crate) fn calculate_braking_deceleration(
             .min(constant_speed_loads.rear);
         let front_load = constant_speed_loads.front + load_transfer;
         let rear_load = constant_speed_loads.rear - load_transfer;
-        let tyre_loads = CornerLoads {
-            front_left: 0.5 * front_load,
-            front_right: 0.5 * front_load,
-            rear_left: 0.5 * rear_load,
-            rear_right: 0.5 * rear_load,
-        };
+        let tyre_loads = split_axle_loads(
+            &AxleLoads {
+                front: front_load,
+                rear: rear_load,
+            },
+            &lateral_transfer,
+        );
 
         let axle_grip = calculate_axle_grip(tyre, &tyre_loads, &axle_lateral_forces);
         let brake_force = calculate_brake_force(&axle_grip, car.brakes.front_bias);

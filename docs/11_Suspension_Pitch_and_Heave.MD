@@ -9,8 +9,9 @@ Once the motion settles, the result is exactly the load transfer of docs/10. The
 is in how the load gets there: with a delay, and possibly with overshoot and oscillation.
 
 The car is stored as four corners (front left, front right, rear left, rear right) so the same
-data works in 2D later. Roll is not modelled yet. With no lateral force and a left-right
+data works in 2D later. Roll is not modelled here. With no lateral force and a left-right
 symmetric car, roll stays exactly zero, so both corners on an axle always behave the same.
+Roll and lateral load transfer are added in docs/19.
 
 ---
 

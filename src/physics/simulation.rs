@@ -22,12 +22,16 @@ use crate::physics::powertrain::{
     Drivetrain, Powertrain, calculate_engine_revs_from_wheel_speed, count_down_shift_time,
     fill_powertrain_tables, select_gear,
 };
+use crate::physics::roll::{
+    RollStiffnesses, calculate_axle_roll_stiffness, calculate_geometric_transfer,
+    calculate_roll_natural_frequencies, calculate_roll_values,
+};
 use crate::physics::states::CarState;
 use crate::physics::suspension::{
-    CornerForces, CornerSuspension, StaticCarValues, calculate_axle_forces,
-    calculate_body_accelerations, calculate_corner_forces_from_state, calculate_corner_tyre_loads,
-    calculate_natural_frequencies, calculate_static_car_values, sum_axle_loads,
-    update_suspension_positions, update_suspension_velocities,
+    CornerForces, CornerLoads, CornerSuspension, StaticCarValues, calculate_body_accelerations,
+    calculate_corner_forces_from_state, calculate_corner_tyre_loads, calculate_natural_frequencies,
+    calculate_static_car_values, sum_axle_loads, update_suspension_positions,
+    update_suspension_velocities,
 };
 use crate::physics::track::{
     Track, calculate_crossing_time, find_active_braking_zone, find_track_position, is_braking_zone,
@@ -201,13 +205,16 @@ impl SimulationState {
 pub(crate) struct StepLoads {
     /// Clamped suspension force of each corner on top of its static load in Newtons, N
     pub corner_forces: CornerForces,
+    /// Tyre load of each corner in Newtons, N, with the geometric lateral load transfer
+    /// (docs/19, equation 19.15)
+    pub tyre_loads: CornerLoads,
     /// Axle normal loads (sum of the corner tyre loads) in Newtons, N
     pub axle_loads: AxleLoads,
     /// Longitudinal grip limit of each axle from the corner tyre loads in Newtons, N (docs/14),
     /// after the lateral force the corner needs (docs/16 section 16.4)
     pub axle_grip: AxleGrip,
     /// Lateral acceleration the line needs at the speed the step starts from in m/s^2 (docs/16,
-    /// equation 16.1)
+    /// equation 16.1), positive to the left
     pub lateral_acceleration: f64,
     /// True if a tyre needs more lateral force than it can make (docs/16 section 16.7)
     pub over_grip_limit: bool,
@@ -326,6 +333,7 @@ pub(crate) fn simulation_step(
     let step_loads = calculate_step_loads(simulation_config, &simulation_state.car);
     simulation_state.car.lateral_acceleration = step_loads.lateral_acceleration;
     simulation_state.car.over_grip_limit = step_loads.over_grip_limit;
+    simulation_state.car.tyre_loads = step_loads.tyre_loads;
     simulation_state.car.acceleration =
         get_car_acceleration(simulation_config, &simulation_state.car, &step_loads);
 
@@ -337,7 +345,8 @@ pub(crate) fn simulation_step(
         );
     }
 
-    // Step 5: body accelerations from the same corner forces and aero loads and this step's a_x
+    // Step 5: body accelerations from the same corner forces and aero loads, this step's a_x
+    // and the a_y of the step's start (docs/19 section 19.11, step 7)
     let car = &simulation_config.car;
     let static_values = &simulation_config.static_values;
     let body_accelerations = calculate_body_accelerations(
@@ -346,9 +355,12 @@ pub(crate) fn simulation_step(
         car.geometry.cog_height,
         &static_values.axle_distances,
         simulation_state.car.acceleration,
-        &calculate_axle_forces(&step_loads.corner_forces),
+        step_loads.lateral_acceleration,
+        &simulation_state.car.suspension,
+        &step_loads.corner_forces,
         &step_loads.aero_loads,
         &static_values.aero_points,
+        &static_values.roll,
     );
 
     // Step 6: update velocities
@@ -493,8 +505,9 @@ fn is_car_stopped(car_state: &CarState) -> bool {
 }
 
 /// Calculates the loads on the car from its state at the start of a step: corner forces and
-/// tyre loads from the suspension state (docs/11 section 11.8, steps 1 to 3) and the aero
-/// loads from the speed (docs/13 section 13.5). Needs `prepare` to have run.
+/// tyre loads from the suspension state (docs/11 section 11.8, steps 1 to 3, docs/19 section
+/// 19.11, steps 1 to 5) and the aero loads from the speed (docs/13 section 13.5). Needs
+/// `prepare` to have run.
 pub(crate) fn calculate_step_loads(
     simulation_config: &SimulationConfig,
     car_state: &CarState,
@@ -505,8 +518,6 @@ pub(crate) fn calculate_step_loads(
         static_values,
         &car_state.suspension,
     );
-    let tyre_loads =
-        calculate_corner_tyre_loads(&static_values.static_corner_loads, &corner_forces);
 
     // Lateral force the line needs from each axle (docs/16 sections 16.2 and 16.3). The
     // curvature is 0 on a track without XY points, so this is all 0 there.
@@ -516,6 +527,13 @@ pub(crate) fn calculate_step_loads(
         simulation_config.car.mass.total,
         lateral_acceleration,
         &static_values.axle_distances,
+    );
+    // The links carry part of the lateral load transfer straight to the tyres (docs/19,
+    // equations 19.14 and 19.15)
+    let tyre_loads = calculate_corner_tyre_loads(
+        &static_values.static_corner_loads,
+        &corner_forces,
+        &calculate_geometric_transfer(&static_values.roll, &axle_lateral_forces),
     );
     let over_grip_limit = is_over_lateral_grip(
         tyre,
@@ -535,6 +553,7 @@ pub(crate) fn calculate_step_loads(
 
     StepLoads {
         corner_forces,
+        tyre_loads,
         axle_loads: sum_axle_loads(&tyre_loads),
         axle_grip: calculate_axle_grip(tyre, &tyre_loads, &ellipse_lateral_forces),
         lateral_acceleration,
@@ -853,8 +872,11 @@ impl SimulationConfig {
             }
         }
 
+        validate_roll(self)?;
+
         // Time step stability (docs/11 section 11.8) with the uncoupled frequencies (11.17),
-        // using the stiffest rate of each corner (spring + end stop)
+        // using the stiffest rate of each corner (spring + end stop), and the faster roll
+        // frequency (docs/19 section 19.10)
         let distances = calculate_axle_distances(mass, &self.car.geometry);
         let frequencies = calculate_natural_frequencies(
             mass.total,
@@ -865,7 +887,25 @@ impl SimulationConfig {
             calculate_stiffest_corner_rate(&suspension.rear_left)
                 + calculate_stiffest_corner_rate(&suspension.rear_right),
         );
-        let frequency_max = frequencies.heave.max(frequencies.pitch);
+        let roll = calculate_roll_values(&self.car, &distances);
+        let stiffest_roll = RollStiffnesses {
+            front: calculate_axle_roll_stiffness(
+                calculate_stiffest_corner_rate(&suspension.front_left),
+                calculate_stiffest_corner_rate(&suspension.front_right),
+                roll.front_track_width,
+                suspension.front_anti_roll_bar_stiffness,
+            ),
+            rear: calculate_axle_roll_stiffness(
+                calculate_stiffest_corner_rate(&suspension.rear_left),
+                calculate_stiffest_corner_rate(&suspension.rear_right),
+                roll.rear_track_width,
+                suspension.rear_anti_roll_bar_stiffness,
+            ),
+        };
+        let frequency_max = frequencies
+            .heave
+            .max(frequencies.pitch)
+            .max(calculate_roll_natural_frequencies(&roll, &stiffest_roll).fast);
         let stability = frequency_max * self.time_step;
         if stability.is_nan() || stability >= STABILITY_LIMIT {
             return Err(format!(
@@ -955,9 +995,109 @@ fn calculate_initial_car_state(simulation_config: &SimulationConfig) -> CarState
     let step_loads = calculate_step_loads(simulation_config, &car_state);
     car_state.lateral_acceleration = step_loads.lateral_acceleration;
     car_state.over_grip_limit = step_loads.over_grip_limit;
+    car_state.tyre_loads = step_loads.tyre_loads;
     car_state.acceleration = get_car_acceleration(simulation_config, &car_state, &step_loads);
 
     car_state
+}
+
+/// Checks the roll model values (docs/19): track widths, roll inertia, roll centres, anti-roll
+/// bars, the frame and the starting roll
+fn validate_roll(simulation_config: &SimulationConfig) -> Result<(), String> {
+    let car = &simulation_config.car;
+    for (field, track_width) in [
+        ("front_track_width", car.geometry.front_track_width),
+        ("rear_track_width", car.geometry.rear_track_width),
+    ] {
+        if !track_width.is_finite() || track_width <= 0.0 {
+            return Err(format!(
+                "geometry.{} must be > 0 m, got {}",
+                field, track_width
+            ));
+        }
+    }
+
+    let suspension = &car.suspension;
+    if !suspension.roll_inertia.is_finite() || suspension.roll_inertia <= 0.0 {
+        return Err(format!(
+            "suspension.roll_inertia must be > 0 kg·m^2, got {}",
+            suspension.roll_inertia
+        ));
+    }
+
+    // Any finite height is allowed: a roll centre can be below the ground or above the CoG
+    for (field, height) in [
+        (
+            "front_roll_centre_height",
+            suspension.front_roll_centre_height,
+        ),
+        (
+            "rear_roll_centre_height",
+            suspension.rear_roll_centre_height,
+        ),
+    ] {
+        if !height.is_finite() {
+            return Err(format!(
+                "suspension.{} must be finite, got {}",
+                field, height
+            ));
+        }
+    }
+
+    for (field, stiffness) in [
+        (
+            "front_anti_roll_bar_stiffness",
+            suspension.front_anti_roll_bar_stiffness,
+        ),
+        (
+            "rear_anti_roll_bar_stiffness",
+            suspension.rear_anti_roll_bar_stiffness,
+        ),
+    ] {
+        if !stiffness.is_finite() || stiffness < 0.0 {
+            return Err(format!(
+                "suspension.{} must be >= 0 N·m/rad, got {}",
+                field, stiffness
+            ));
+        }
+    }
+
+    if let Some(frame) = &car.frame
+        && (!frame.torsional_stiffness.is_finite() || frame.torsional_stiffness <= 0.0)
+    {
+        return Err(format!(
+            "frame.torsional_stiffness must be > 0 N·m/rad (leave the [frame] table out for a \
+             rigid frame), got {}",
+            frame.torsional_stiffness
+        ));
+    }
+
+    let state = &simulation_config.initial_car_state.suspension;
+    for (field, value) in [
+        ("roll_front", state.roll_front),
+        ("roll_rear", state.roll_rear),
+        ("roll_rate_front", state.roll_rate_front),
+        ("roll_rate_rear", state.roll_rate_rear),
+    ] {
+        if !value.is_finite() {
+            return Err(format!(
+                "initial_car_state.suspension.{} must be finite, got {}",
+                field, value
+            ));
+        }
+    }
+    // A rigid frame can't twist, so both halves roll together (docs/19 section 19.8)
+    if car.frame.is_none()
+        && (state.roll_front != state.roll_rear || state.roll_rate_front != state.roll_rate_rear)
+    {
+        return Err(format!(
+            "initial_car_state.suspension: with a rigid frame (no [frame] table) roll_front must \
+             equal roll_rear and roll_rate_front must equal roll_rate_rear, got {} and {}, {} and {}",
+            state.roll_front, state.roll_rear, state.roll_rate_front, state.roll_rate_rear
+        ));
+    }
+
+    Ok(())
 }
 
 /// Checks one suspension corner. `name` is the corner's field name, used in the error message.
@@ -1153,12 +1293,14 @@ fn calculate_stiffest_corner_rate(corner: &CornerSuspension) -> f64 {
 mod tests {
     use crate::physics::aero::calculate_aero_loads;
     use crate::physics::aero::calculate_air_drag;
+    use crate::physics::chassis::Frame;
     use crate::physics::cornering::calculate_constant_speed_axle_loads;
     use crate::physics::driver::Driver;
     use crate::physics::powertrain::{
         Drivetrain, calculate_engine_revs_from_wheel_speed, calculate_engine_torque,
         calculate_peak_torque, calculate_powertrain_force, calculate_total_ratio,
     };
+    use crate::physics::roll::{calculate_steady_state_lateral_transfer, split_axle_loads};
     use crate::physics::simulation::{
         EndCondition, SimulationConfig, SimulationState, calculate_step_loads,
         calculate_total_steps, get_car_acceleration, get_car_distance, get_car_speed,
@@ -1818,6 +1960,32 @@ mod tests {
                 }
             }),
             ("wheelbase = 0", |c| c.car.geometry.wheelbase = 0.0),
+            ("front_track_width = 0", |c| {
+                c.car.geometry.front_track_width = 0.0
+            }),
+            ("rear_track_width NaN", |c| {
+                c.car.geometry.rear_track_width = f64::NAN
+            }),
+            ("roll_inertia = 0", |c| c.car.suspension.roll_inertia = 0.0),
+            ("roll centre NaN", |c| {
+                c.car.suspension.front_roll_centre_height = f64::NAN
+            }),
+            ("anti-roll bar < 0", |c| {
+                c.car.suspension.rear_anti_roll_bar_stiffness = -1.0
+            }),
+            ("frame stiffness = 0", |c| {
+                c.car.frame = Some(Frame {
+                    torsional_stiffness: 0.0,
+                })
+            }),
+            ("rigid frame with twisted start", |c| {
+                c.initial_car_state.suspension.roll_front = 0.01
+            }),
+            ("frame too stiff for the time step", |c| {
+                c.car.frame = Some(Frame {
+                    torsional_stiffness: 1e12,
+                })
+            }),
             ("wheelbase < 0", |c| c.car.geometry.wheelbase = -3.4),
             ("cog_height < 0", |c| c.car.geometry.cog_height = -0.1),
             ("time_step = 0", |c| c.time_step = 0.0),
@@ -2261,6 +2429,9 @@ mod tests {
         // Nose down and load moved to the front. The total stays m * g = 8000 N: the symmetric
         // car keeps heave at exactly 0, so dF_f = -dF_r (1e-6 N covers rounding)
         assert!(suspension.pitch > 0.0);
+        // A straight line never rolls the body (docs/19 section 19.13)
+        assert_eq!(suspension.roll_front, 0.0);
+        assert_eq!(suspension.roll_rear, 0.0);
         assert!(loads.front > 4000.0 + 500.0, "{:?}", loads);
         assert!((loads.total() - 8000.0).abs() < 1e-6, "{:?}", loads);
 
@@ -2641,6 +2812,82 @@ mod tests {
         );
         assert!((step_loads.axle_loads.front - expected.front).abs() < 0.01);
         assert!((step_loads.axle_loads.rear - expected.rear).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_skidpad_with_lateral_load_transfer() {
+        // docs/19 section 19.9: with load-sensitive tyres, roll centres, a front bar and a
+        // flexible frame the planned limit still matches the loads the dynamic roll settles at
+        let mut simulation_config = SimulationConfig {
+            track: skidpad_circle_track(57),
+            initial_car_state: CarState {
+                distance: 0.0,
+                speed: 5.0,
+                ..CarState::default()
+            },
+            end_condition: EndCondition::Laps {
+                laps: 3,
+                max_time: 60.0,
+            },
+            ..SimulationConfig::default()
+        };
+        let car = &mut simulation_config.car;
+        car.tyre.load_sensitivity = 0.2;
+        car.suspension.front_roll_centre_height = 0.05;
+        car.suspension.rear_roll_centre_height = 0.10;
+        car.suspension.front_anti_roll_bar_stiffness = 166_400.0;
+        car.frame = Some(Frame {
+            torsional_stiffness: 499_200.0,
+        });
+        simulation_config.prepare().unwrap();
+        let limit = simulation_config.corner_speed_limits[0];
+
+        let mut simulation_state = SimulationState::new(&simulation_config);
+        let mut over_limit_after_first_lap = false;
+        while simulation_state.lap_times.len() < 3 {
+            simulation_step(&mut simulation_state, &simulation_config);
+            if !simulation_state.lap_times.is_empty() && simulation_state.car.over_grip_limit {
+                over_limit_after_first_lap = true;
+            }
+        }
+        assert!((simulation_state.car.speed - limit).abs() < 1e-9);
+        assert!(!over_limit_after_first_lap);
+        // Left turn: rolls to the right, the front half a little less than the rear (the
+        // front bar holds it, the frame twists)
+        let suspension = simulation_state.car.suspension;
+        assert!(suspension.roll_front > 0.0 && suspension.roll_rear > suspension.roll_front);
+
+        // Tyre loads = constant speed axle loads split with the settled transfer (19.22)
+        let step_loads = calculate_step_loads(&simulation_config, &simulation_state.car);
+        let distances = &simulation_config.static_values.axle_distances;
+        let expected = split_axle_loads(
+            &calculate_constant_speed_axle_loads(
+                &simulation_config.car,
+                &simulation_config.environment,
+                distances,
+                limit,
+            ),
+            &calculate_steady_state_lateral_transfer(
+                &simulation_config.car,
+                distances,
+                simulation_state.car.lateral_acceleration,
+            ),
+        );
+        let loads = step_loads.tyre_loads;
+        for (actual, wanted) in [
+            (loads.front_left, expected.front_left),
+            (loads.front_right, expected.front_right),
+            (loads.rear_left, expected.rear_left),
+            (loads.rear_right, expected.rear_right),
+        ] {
+            assert!(
+                (actual - wanted).abs() < 0.05,
+                "{:?} vs {:?}",
+                loads,
+                expected
+            );
+        }
+        assert!(loads.front_right > loads.front_left);
     }
 
     #[test]

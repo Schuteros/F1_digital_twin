@@ -1,4 +1,4 @@
-use crate::physics::suspension::SuspensionState;
+use crate::physics::suspension::{CornerLoads, SuspensionState};
 use serde::Deserialize;
 
 /// State of the car at one moment of the simulation.
@@ -37,7 +37,8 @@ pub struct CarState {
     /// Calculated from the rest of the state, not in the run file.
     #[serde(skip)]
     pub acceleration: f64,
-    /// Body heave and pitch motion, measured from static (docs/11 section 11.1)
+    /// Body heave, pitch and roll motion, measured from static (docs/11 section 11.1, docs/19
+    /// section 19.1)
     pub suspension: SuspensionState,
     /// Number of times the distance has passed a whole lap length (k, docs/15 section 15.6),
     /// 0 on a track without XY points. Calculated from the distance and the track, not in the
@@ -73,14 +74,19 @@ pub struct CarState {
     #[serde(skip, default = "no_corner_speed_limit")]
     pub target_speed: f64,
     /// Lateral acceleration the line needs at the current speed in meters per second squared,
-    /// m/s^2, always >= 0 (docs/16, equation 16.1). Output only, calculated from the speed and
-    /// the curvature, not in the run file.
+    /// m/s^2, positive to the left, so positive in a left turn (docs/16, equation 16.1, docs/19
+    /// section 19.1). Output only, calculated from the speed and the curvature, not in the run
+    /// file.
     #[serde(skip)]
     pub lateral_acceleration: f64,
     /// True if a tyre needs more lateral force than it can make, so in reality the car would
     /// run wide (docs/16 section 16.7). Output only, not in the run file.
     #[serde(skip)]
     pub over_grip_limit: bool,
+    /// Tyre load of each corner in Newtons, N (docs/19, equation 19.15). Output only, not in
+    /// the run file.
+    #[serde(skip)]
+    pub(crate) tyre_loads: CornerLoads,
 }
 
 /// Corner speed limit and target speed of a car state read from a run file, before `prepare`
@@ -110,6 +116,7 @@ impl Default for CarState {
             target_speed: f64::INFINITY,
             lateral_acceleration: 0.0,
             over_grip_limit: false,
+            tyre_loads: CornerLoads::default(),
         }
     }
 }

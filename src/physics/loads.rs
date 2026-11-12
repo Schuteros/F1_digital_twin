@@ -77,6 +77,7 @@ mod tests {
         ChassisGeometry {
             wheelbase: 3.0,  // meters (m)
             cog_height: 0.3, // meters (m)
+            ..ChassisGeometry::default()
         }
     }
 
@@ -163,6 +164,7 @@ mod tests {
         let flat_geometry = ChassisGeometry {
             wheelbase: 3.0,
             cog_height: 0.0,
+            ..ChassisGeometry::default()
         };
         for acceleration in [-20.0, -5.0, 5.0, 20.0] {
             let flat = calculate_axle_loads(&mass, &flat_geometry, g_acceleration, acceleration);

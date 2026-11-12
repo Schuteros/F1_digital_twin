@@ -2,7 +2,7 @@
 
 use crate::physics::aero::Aero;
 use crate::physics::braking::Brakes;
-use crate::physics::chassis::ChassisGeometry;
+use crate::physics::chassis::{ChassisGeometry, Frame};
 use crate::physics::powertrain::Powertrain;
 use crate::physics::suspension::Suspension;
 use crate::physics::tyres::Tyre;
@@ -31,6 +31,9 @@ pub struct Car {
 
     /// Defines the suspension (springs, dampers, end stops and pitch inertia) of the car
     pub suspension: Suspension,
+
+    /// Frame torsional stiffness (docs/19 section 19.8). None = rigid frame.
+    pub frame: Option<Frame>,
 }
 
 impl Default for Car {
@@ -50,6 +53,7 @@ impl Default for Car {
             geometry: ChassisGeometry::default(),
             brakes: Brakes::default(),
             suspension: Suspension::default(),
+            frame: None,
         }
     }
 }

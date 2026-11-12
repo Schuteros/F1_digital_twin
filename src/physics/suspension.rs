@@ -1,4 +1,4 @@
-//! Suspension model: body heave and pitch on four spring-damper corners (docs/11)
+//! Suspension model: body heave, pitch and roll on four spring-damper corners (docs/11, docs/19)
 //!
 //! All motion is measured from the static equilibrium (docs/11 section 11.2), so the state
 //! starts at zero and the static loads never enter the body equations.
@@ -10,9 +10,14 @@ use crate::physics::chassis::{
 };
 use crate::physics::integrators::euler;
 use crate::physics::loads::{AxleLoads, calculate_static_axle_loads};
+use crate::physics::roll::{
+    LateralLoadTransfer, RollAccelerations, RollValues, calculate_anti_roll_bar_force,
+    calculate_roll_accelerations, calculate_roll_values,
+};
 use serde::Deserialize;
 
-/// Suspension of the whole car: four corners and the pitch inertia of the body.
+/// Suspension of the whole car: four corners, anti-roll bars, roll centres and the body
+/// inertias.
 ///
 /// CoG to axle distances (d_f, d_r) are not stored here: they follow from the front/rear
 /// split in `Mass`, like in docs/10 section 10.6, so there is one source of truth.
@@ -36,6 +41,26 @@ pub struct Suspension {
     /// Rear ride height with the car standing still on level ground in meters, m
     #[serde(rename = "static_ride_height_rear_m")]
     pub static_ride_height_rear: f64,
+    /// Roll moment of inertia of the body about a lengthwise axis through its CoG (J_phi) in
+    /// kilogram meters squared, kg·m^2 (docs/19)
+    #[serde(rename = "roll_inertia_kg_m2")]
+    pub roll_inertia: f64,
+    /// Front roll centre height above the ground (h_rc,f) in meters, m (docs/19 section 19.3).
+    /// Optional, 0 when missing.
+    #[serde(rename = "front_roll_centre_height_m", default)]
+    pub front_roll_centre_height: f64,
+    /// Rear roll centre height above the ground (h_rc,r) in meters, m (docs/19 section 19.3).
+    /// Optional, 0 when missing.
+    #[serde(rename = "rear_roll_centre_height_m", default)]
+    pub rear_roll_centre_height: f64,
+    /// Roll stiffness the front anti-roll bar adds to the front axle (K_arb,f) in Newton meters
+    /// per radian, N·m/rad (docs/19 section 19.4). Optional, 0 (no bar) when missing.
+    #[serde(rename = "front_anti_roll_bar_stiffness_N_m_per_rad", default)]
+    pub front_anti_roll_bar_stiffness: f64,
+    /// Roll stiffness the rear anti-roll bar adds to the rear axle (K_arb,r) in Newton meters
+    /// per radian, N·m/rad (docs/19 section 19.4). Optional, 0 (no bar) when missing.
+    #[serde(rename = "rear_anti_roll_bar_stiffness_N_m_per_rad", default)]
+    pub rear_anti_roll_bar_stiffness: f64,
 }
 
 impl Default for Suspension {
@@ -49,6 +74,11 @@ impl Default for Suspension {
             pitch_inertia: 1_000.0,
             static_ride_height_front: 0.030,
             static_ride_height_rear: 0.060,
+            roll_inertia: 250.0,
+            front_roll_centre_height: 0.0,
+            rear_roll_centre_height: 0.0,
+            front_anti_roll_bar_stiffness: 0.0,
+            rear_anti_roll_bar_stiffness: 0.0,
         }
     }
 }
@@ -91,7 +121,10 @@ impl Default for CornerSuspension {
     }
 }
 
-/// Body motion measured from the static equilibrium (docs/11 section 11.1)
+/// Body motion measured from the static equilibrium (docs/11 section 11.1, docs/19 section 19.1).
+///
+/// The front and rear halves of the body have their own roll (docs/19 section 19.8). With a
+/// rigid frame they are always equal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SuspensionState {
@@ -107,6 +140,22 @@ pub struct SuspensionState {
     /// Pitch rate in radians per second, rad/s, positive nose down
     #[serde(rename = "pitch_rate_rad_per_s")]
     pub pitch_rate: f64,
+    /// Roll of the front half of the body from its static attitude (phi_f) in radians, rad,
+    /// positive right side down. Optional in a run file, 0 when missing.
+    #[serde(rename = "roll_front_rad", default)]
+    pub roll_front: f64,
+    /// Roll of the rear half of the body (phi_r) in radians, rad, positive right side down.
+    /// Optional in a run file, 0 when missing.
+    #[serde(rename = "roll_rear_rad", default)]
+    pub roll_rear: f64,
+    /// Roll rate of the front half (omega_phi,f) in radians per second, rad/s, positive right
+    /// side down. Optional in a run file, 0 when missing.
+    #[serde(rename = "roll_rate_front_rad_per_s", default)]
+    pub roll_rate_front: f64,
+    /// Roll rate of the rear half (omega_phi,r) in radians per second, rad/s, positive right
+    /// side down. Optional in a run file, 0 when missing.
+    #[serde(rename = "roll_rate_rear_rad_per_s", default)]
+    pub roll_rate_rear: f64,
 }
 
 /// Values that follow from the car standing still and g, so they are the same for the whole
@@ -120,9 +169,12 @@ pub(crate) struct StaticCarValues {
     pub static_corner_loads: CornerLoads,
     /// Where drag and downforce act relative to the CoG
     pub aero_points: AeroPoints,
+    /// Track widths, roll centres, masses and inertias of the roll model (docs/19)
+    pub roll: RollValues,
 }
 
-/// Suspension compression and compression speed of each axle (both corners of an axle are equal without roll)
+/// Suspension compression and compression speed of each axle on the car's centre line, from heave
+/// and pitch only. Roll moves the left and right corner of an axle away from it (`CornerTravel`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AxleTravel {
     /// Front compression from static in meters, m, positive = compressed
@@ -133,6 +185,28 @@ pub(crate) struct AxleTravel {
     pub front_compression_speed: f64,
     /// Rear compression speed in meters per second, m/s
     pub rear_compression_speed: f64,
+}
+
+/// Compression and compression speed of one corner
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WheelTravel {
+    /// Compression from static in meters, m, positive = compressed
+    pub compression: f64,
+    /// Compression speed in meters per second, m/s
+    pub compression_speed: f64,
+}
+
+/// Compression and compression speed of every corner, with roll (docs/19, equations 19.8 and 19.9)
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CornerTravel {
+    /// Front left corner
+    pub front_left: WheelTravel,
+    /// Front right corner
+    pub front_right: WheelTravel,
+    /// Rear left corner
+    pub rear_left: WheelTravel,
+    /// Rear right corner
+    pub rear_right: WheelTravel,
 }
 
 /// Suspension force of each corner on top of its static load in Newtons, N, positive = pushing the body up
@@ -177,6 +251,9 @@ pub(crate) struct BodyAccelerations {
     pub heave_acceleration: f64,
     /// Pitch acceleration in radians per second squared, rad/s^2, positive nose down
     pub pitch_acceleration: f64,
+    /// Roll accelerations of the front and rear half in radians per second squared, rad/s^2,
+    /// positive right side down (docs/19)
+    pub roll_acceleration: RollAccelerations,
 }
 
 /// Front and rear ride heights in meters, m
@@ -218,6 +295,7 @@ pub(crate) fn calculate_static_car_values(car: &Car, g_acceleration: f64) -> Sta
         axle_distances,
         static_corner_loads: calculate_static_corner_loads(&car.mass, g_acceleration),
         aero_points: calculate_aero_points(&car.aero, &axle_distances),
+        roll: calculate_roll_values(car, &axle_distances),
     }
 }
 
@@ -236,15 +314,57 @@ pub(crate) fn calculate_static_corner_loads(mass: &Mass, g_acceleration: f64) ->
     }
 }
 
-/// Calculates the clamped corner forces from the suspension state (docs/11 section 11.8, steps 1 and 2)
+/// Calculates the clamped corner forces from the suspension state (docs/11 section 11.8, steps 1
+/// and 2, docs/19 section 19.11, steps 2 and 3)
 pub(crate) fn calculate_corner_forces_from_state(
     suspension: &Suspension,
     static_values: &StaticCarValues,
     state: &SuspensionState,
 ) -> CornerForces {
-    let travel = calculate_axle_travel(state, &static_values.axle_distances);
+    let axle_travel = calculate_axle_travel(state, &static_values.axle_distances);
+    let travel = calculate_corner_travel(&axle_travel, state, &static_values.roll);
 
-    calculate_corner_forces(suspension, &travel, &static_values.static_corner_loads)
+    calculate_corner_forces(
+        suspension,
+        &travel,
+        &static_values.roll,
+        &static_values.static_corner_loads,
+    )
+}
+
+/// Calculates compression and compression speed of every corner: the axle's centre line value,
+/// minus half the track width times the roll on the left, plus it on the right (docs/19,
+/// equations 19.8 and 19.9). The front corners use the front roll, the rear corners the rear roll.
+pub(crate) fn calculate_corner_travel(
+    axle_travel: &AxleTravel,
+    state: &SuspensionState,
+    roll: &RollValues,
+) -> CornerTravel {
+    let half_front = 0.5 * roll.front_track_width;
+    let half_rear = 0.5 * roll.rear_track_width;
+    let wheel = |compression: f64, compression_speed: f64| WheelTravel {
+        compression,
+        compression_speed,
+    };
+
+    CornerTravel {
+        front_left: wheel(
+            axle_travel.front_compression - half_front * state.roll_front,
+            axle_travel.front_compression_speed - half_front * state.roll_rate_front,
+        ),
+        front_right: wheel(
+            axle_travel.front_compression + half_front * state.roll_front,
+            axle_travel.front_compression_speed + half_front * state.roll_rate_front,
+        ),
+        rear_left: wheel(
+            axle_travel.rear_compression - half_rear * state.roll_rear,
+            axle_travel.rear_compression_speed - half_rear * state.roll_rate_rear,
+        ),
+        rear_right: wheel(
+            axle_travel.rear_compression + half_rear * state.roll_rear,
+            axle_travel.rear_compression_speed + half_rear * state.roll_rate_rear,
+        ),
+    }
 }
 
 /// Calculates compressions and compression speeds of both axles from the body state
@@ -299,59 +419,77 @@ pub(crate) fn calculate_rear_compression_speed(
     heave_velocity - distance_rear * pitch_rate
 }
 
-/// Calculates the clamped force of every corner from the axle travel
-/// (docs/11, equations 11.7 to 11.10)
+/// Calculates the clamped force of every corner from the corner travel, with the anti-roll bar
+/// force (docs/11, equations 11.7 to 11.10, docs/19, equations 19.10 and 19.11)
 pub(crate) fn calculate_corner_forces(
     suspension: &Suspension,
-    travel: &AxleTravel,
+    travel: &CornerTravel,
+    roll: &RollValues,
     static_loads: &CornerLoads,
 ) -> CornerForces {
+    // (19.10): added to the right corner, subtracted from the left one
+    let front_bar = calculate_anti_roll_bar_force(
+        suspension.front_anti_roll_bar_stiffness,
+        travel.front_left.compression,
+        travel.front_right.compression,
+        roll.front_track_width,
+    );
+    let rear_bar = calculate_anti_roll_bar_force(
+        suspension.rear_anti_roll_bar_stiffness,
+        travel.rear_left.compression,
+        travel.rear_right.compression,
+        roll.rear_track_width,
+    );
+
     CornerForces {
         front_left: calculate_corner_force(
             &suspension.front_left,
-            travel.front_compression,
-            travel.front_compression_speed,
+            &travel.front_left,
+            -front_bar,
             static_loads.front_left,
         ),
         front_right: calculate_corner_force(
             &suspension.front_right,
-            travel.front_compression,
-            travel.front_compression_speed,
+            &travel.front_right,
+            front_bar,
             static_loads.front_right,
         ),
         rear_left: calculate_corner_force(
             &suspension.rear_left,
-            travel.rear_compression,
-            travel.rear_compression_speed,
+            &travel.rear_left,
+            -rear_bar,
             static_loads.rear_left,
         ),
         rear_right: calculate_corner_force(
             &suspension.rear_right,
-            travel.rear_compression,
-            travel.rear_compression_speed,
+            &travel.rear_right,
+            rear_bar,
             static_loads.rear_right,
         ),
     }
 }
 
 /// Calculates the corner force on top of the static load in Newtons, N, with the wheel lift
-/// clamp (docs/11, equations 11.7 and 11.10).
+/// clamp (docs/11, equations 11.7 and 11.10, docs/19, equation 19.11).
 ///
-/// * `compression` - suspension compression from static in meters, m, positive = compressed
-/// * `compression_speed` - compression speed in meters per second, m/s
+/// * `travel` - compression and compression speed of this corner
+/// * `anti_roll_bar_force` - force of the axle's anti-roll bar on this corner in Newtons, N,
+///   positive = pushing the body up (docs/19, equation 19.10)
 /// * `static_corner_load` - static tyre load of this corner in Newtons, N
 ///
 /// A tyre can't pull on the road, so the force never goes below `-static_corner_load`
 /// (tyre load 0 N). NaN is passed through, not hidden by the clamp.
 pub(crate) fn calculate_corner_force(
     corner: &CornerSuspension,
-    compression: f64,
-    compression_speed: f64,
+    travel: &WheelTravel,
+    anti_roll_bar_force: f64,
     static_corner_load: f64,
 ) -> f64 {
+    let compression = travel.compression;
     let force = corner.spring_rate * compression
-        + corner.damping * compression_speed
-        + calculate_end_stop_force(corner, compression);
+        + corner.damping * travel.compression_speed
+        + calculate_end_stop_force(corner, compression)
+        + anti_roll_bar_force;
 
     if force < -static_corner_load {
         -static_corner_load
@@ -376,17 +514,44 @@ pub(crate) fn calculate_end_stop_force(corner: &CornerSuspension, compression: f
     }
 }
 
-/// Calculates tyre load of each corner in Newtons, N: static load + corner force
-/// (docs/11, equation 11.9)
+/// Calculates tyre load of each corner in Newtons, N: static load + corner force, plus the
+/// geometric lateral load transfer on the right tyre and minus it on the left one (docs/11,
+/// equation 11.9, docs/19, equation 19.15). A tyre load is never below 0.
+///
+/// * `geometric_transfer` - load the links move to the right tyre of each axle in Newtons, N
+///   (docs/19, equation 19.14), 0 without roll centres or lateral force
 pub(crate) fn calculate_corner_tyre_loads(
     static_loads: &CornerLoads,
     corner_forces: &CornerForces,
+    geometric_transfer: &LateralLoadTransfer,
 ) -> CornerLoads {
+    let tyre_load = |static_load: f64, corner_force: f64, transfer: f64| {
+        let load = static_load + corner_force + transfer;
+        // NaN is passed through, not hidden by the clamp
+        if load < 0.0 { 0.0 } else { load }
+    };
+
     CornerLoads {
-        front_left: static_loads.front_left + corner_forces.front_left,
-        front_right: static_loads.front_right + corner_forces.front_right,
-        rear_left: static_loads.rear_left + corner_forces.rear_left,
-        rear_right: static_loads.rear_right + corner_forces.rear_right,
+        front_left: tyre_load(
+            static_loads.front_left,
+            corner_forces.front_left,
+            -geometric_transfer.front,
+        ),
+        front_right: tyre_load(
+            static_loads.front_right,
+            corner_forces.front_right,
+            geometric_transfer.front,
+        ),
+        rear_left: tyre_load(
+            static_loads.rear_left,
+            corner_forces.rear_left,
+            -geometric_transfer.rear,
+        ),
+        rear_right: tyre_load(
+            static_loads.rear_right,
+            corner_forces.rear_right,
+            geometric_transfer.rear,
+        ),
     }
 }
 
@@ -407,17 +572,20 @@ pub(crate) fn calculate_axle_forces(corner_forces: &CornerForces) -> AxleForces 
     }
 }
 
-/// Calculates heave and pitch accelerations of the body (docs/11, equations 11.12 and 11.13,
-/// with the aero terms of docs/13, equations 13.2 and 13.3).
+/// Calculates heave, pitch and roll accelerations of the body (docs/11, equations 11.12 and
+/// 11.13, with the aero terms of docs/13, equations 13.2 and 13.3, and roll from docs/19,
+/// equations 19.12, 19.20 and 19.21).
 ///
 /// * `mass_total` - total (sprung) mass in kilograms, kg
 /// * `pitch_inertia` - pitch moment of inertia about the CoG in kilogram meters squared, kg·m^2
 /// * `cog_height` - CoG height above the ground in meters, m
 /// * `longitudinal_acceleration` - a_x in meters per second squared, m/s^2, positive forward
+/// * `lateral_acceleration` - a_y in meters per second squared, m/s^2, positive to the left
 /// * `aero_loads` - drag and downforce in Newtons, N
 /// * `aero_points` - where drag and downforce act (`calculate_aero_points`)
+/// * `roll` - roll model values (`calculate_roll_values`)
 ///
-/// `axle_forces` must be the clamped values, the same ones that go into the tyre loads.
+/// `corner_forces` must be the clamped values, the same ones that go into the tyre loads.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn calculate_body_accelerations(
     mass_total: f64,
@@ -425,10 +593,15 @@ pub(crate) fn calculate_body_accelerations(
     cog_height: f64,
     distances: &AxleDistances,
     longitudinal_acceleration: f64,
-    axle_forces: &AxleForces,
+    lateral_acceleration: f64,
+    state: &SuspensionState,
+    corner_forces: &CornerForces,
     aero_loads: &AeroLoads,
     aero_points: &AeroPoints,
+    roll: &RollValues,
 ) -> BodyAccelerations {
+    // The anti-roll bar forces cancel within each axle, so they never reach heave or pitch
+    let axle_forces = calculate_axle_forces(corner_forces);
     // m * a_z = -(dF_f + dF_r) + F_downforce (13.2)
     let heave_acceleration =
         (-(axle_forces.front + axle_forces.rear) + aero_loads.downforce) / mass_total;
@@ -443,10 +616,16 @@ pub(crate) fn calculate_body_accelerations(
     BodyAccelerations {
         heave_acceleration,
         pitch_acceleration: pitch_moment / pitch_inertia,
+        roll_acceleration: calculate_roll_accelerations(
+            roll,
+            lateral_acceleration,
+            state,
+            corner_forces,
+        ),
     }
 }
 
-/// Updates heave velocity and pitch rate by acceleration * time step
+/// Updates heave velocity, pitch rate and roll rates by acceleration * time step
 /// (docs/11 section 11.8, step 6)
 pub(crate) fn update_suspension_velocities(
     state: &SuspensionState,
@@ -464,11 +643,21 @@ pub(crate) fn update_suspension_velocities(
             accelerations.pitch_acceleration,
             time_step,
         ),
+        roll_rate_front: euler(
+            state.roll_rate_front,
+            accelerations.roll_acceleration.front,
+            time_step,
+        ),
+        roll_rate_rear: euler(
+            state.roll_rate_rear,
+            accelerations.roll_acceleration.rear,
+            time_step,
+        ),
         ..*state
     }
 }
 
-/// Updates heave and pitch by the **new** velocities * time step (semi-implicit Euler,
+/// Updates heave, pitch and roll by the **new** velocities * time step (semi-implicit Euler,
 /// docs/11 section 11.8, step 7). Call after `update_suspension_velocities`.
 pub(crate) fn update_suspension_positions(
     state: &SuspensionState,
@@ -477,6 +666,8 @@ pub(crate) fn update_suspension_positions(
     SuspensionState {
         heave: euler(state.heave, state.heave_velocity, time_step),
         pitch: euler(state.pitch, state.pitch_rate, time_step),
+        roll_front: euler(state.roll_front, state.roll_rate_front, time_step),
+        roll_rear: euler(state.roll_rear, state.roll_rate_rear, time_step),
         ..*state
     }
 }
@@ -547,7 +738,11 @@ pub(crate) fn calculate_tyre_loads(
     let static_values = calculate_static_car_values(car, g_acceleration);
     let corner_forces = calculate_corner_forces_from_state(&car.suspension, &static_values, state);
 
-    calculate_corner_tyre_loads(&static_values.static_corner_loads, &corner_forces)
+    calculate_corner_tyre_loads(
+        &static_values.static_corner_loads,
+        &corner_forces,
+        &LateralLoadTransfer::default(),
+    )
 }
 
 /// Calculates heave and pitch accelerations from the suspension state, a_x and the aero loads
@@ -573,9 +768,12 @@ pub(crate) fn calculate_body_accelerations_from_state(
         car.geometry.cog_height,
         &static_values.axle_distances,
         longitudinal_acceleration,
-        &calculate_axle_forces(&corner_forces),
+        0.0,
+        state,
+        &corner_forces,
         aero_loads,
         &static_values.aero_points,
+        &static_values.roll,
     )
 }
 
@@ -585,6 +783,7 @@ mod tests {
     use crate::physics::car::{Car, Mass};
     use crate::physics::chassis::{AeroPoints, AxleDistances, calculate_axle_distances};
     use crate::physics::loads::{AxleLoads, calculate_axle_loads};
+    use crate::physics::roll::calculate_roll_values;
     use crate::physics::suspension::{
         AxleForces, AxleTravel, CornerSuspension, Suspension, SuspensionState,
         calculate_axle_forces, calculate_axle_travel, calculate_body_accelerations,
@@ -596,7 +795,26 @@ mod tests {
         calculate_static_corner_loads, calculate_tyre_loads, sum_axle_loads,
         update_suspension_positions, update_suspension_velocities,
     };
+    use crate::physics::suspension::{CornerForces, WheelTravel};
     use std::f64::consts::PI;
+
+    /// Corner travel with the given compression and compression speed
+    fn wheel(compression: f64, compression_speed: f64) -> WheelTravel {
+        WheelTravel {
+            compression,
+            compression_speed,
+        }
+    }
+
+    /// Corner forces with each axle force shared equally between its two corners
+    fn split_axle_forces(axle_forces: &AxleForces) -> CornerForces {
+        CornerForces {
+            front_left: 0.5 * axle_forces.front,
+            front_right: 0.5 * axle_forces.front,
+            rear_left: 0.5 * axle_forces.rear,
+            rear_right: 0.5 * axle_forces.rear,
+        }
+    }
 
     const G_ACCELERATION: f64 = 9.81; // meters per second squared (m/s^2)
     const TIME_STEP: f64 = 0.001; // seconds (s)
@@ -716,20 +934,23 @@ mod tests {
         let static_corner_load = 2000.0; // Newtons (N)
 
         // Spring + damper: 130 000 N/m * 0.01 m + 5000 N·s/m * 0.1 m/s = 1300 N + 500 N = 1800 N
-        let force = calculate_corner_force(&corner, 0.01, 0.1, static_corner_load);
+        let force = calculate_corner_force(&corner, &wheel(0.01, 0.1), 0.0, static_corner_load);
         assert!((force - 1800.0).abs() < 1e-9);
 
         // Spring + bump stop: 130 000 * 0.02 + 1 000 000 * (0.02 - 0.015) = 2600 N + 5000 N = 7600 N
-        let force = calculate_corner_force(&corner, 0.02, 0.0, static_corner_load);
+        let force = calculate_corner_force(&corner, &wheel(0.02, 0.0), 0.0, static_corner_load);
         assert!((force - 7600.0).abs() < 1e-9);
 
         // Wheel lift: 130 000 * (-0.02) + 5000 * (-0.1) = -2600 N - 500 N = -3100 N < -2000 N
         // -> clamped to -2000 N, tyre load 0 N
-        let force = calculate_corner_force(&corner, -0.02, -0.1, static_corner_load);
+        let force = calculate_corner_force(&corner, &wheel(-0.02, -0.1), 0.0, static_corner_load);
         assert_eq!(force, -2000.0);
 
         // NaN is not hidden by the clamp
-        assert!(calculate_corner_force(&corner, f64::NAN, 0.0, static_corner_load).is_nan());
+        assert!(
+            calculate_corner_force(&corner, &wheel(f64::NAN, 0.0), 0.0, static_corner_load)
+                .is_nan()
+        );
     }
 
     #[test]
@@ -799,9 +1020,12 @@ mod tests {
             0.3,
             &distances,
             -5.0,
-            &axle_forces,
+            0.0,
+            &SuspensionState::default(),
+            &split_axle_forces(&axle_forces),
             &AeroLoads::default(),
             &no_aero_points,
+            &calculate_roll_values(&Car::default(), &distances),
         );
         assert!((accelerations.heave_acceleration + 0.2).abs() < 1e-12);
         assert!((accelerations.pitch_acceleration + 0.12).abs() < 1e-12);
@@ -836,9 +1060,12 @@ mod tests {
             0.3,
             &distances,
             0.0,
-            &axle_forces,
+            0.0,
+            &SuspensionState::default(),
+            &split_axle_forces(&axle_forces),
             &aero_loads,
             &aero_points,
+            &calculate_roll_values(&Car::default(), &distances),
         );
         assert!((accelerations.heave_acceleration - 3.0).abs() < 1e-12);
         assert!((accelerations.pitch_acceleration - 0.2).abs() < 1e-12);

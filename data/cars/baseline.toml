@@ -12,11 +12,13 @@ total_kg = 815.494393476
 front_kg = 407.747196738
 rear_kg = 407.747196738
 
-# Chassis dimensions for load transfer and the suspension model (docs/10, docs/11).
+# Chassis dimensions for load transfer and the suspension model (docs/10, docs/11, docs/19).
 # Placeholder values: verify against current F1 regulations / sources.
 [geometry]
 wheelbase_m = 3.4
 cog_height_m = 0.3
+front_track_width_m = 1.6
+rear_track_width_m = 1.6
 
 # Air drag (docs/04), downforce and where both act (docs/13).
 # Downforce and pressure point values are placeholders: replace with sourced values.
@@ -64,12 +66,21 @@ downshift_hysteresis_m_per_s = 0.5
 [powertrain.drivetrain]
 type = "rear_wheel_drive"
 
-# Body heave and pitch on four spring-damper corners (docs/11).
+# Body heave, pitch and roll on four spring-damper corners (docs/11, docs/19).
 # Placeholder values: replace with sourced values.
 [suspension]
 pitch_inertia_kg_m2 = 1_000.0
 static_ride_height_front_m = 0.030
 static_ride_height_rear_m = 0.060
+roll_inertia_kg_m2 = 250.0
+# Optional, 0 when missing: the roll axis is on the ground and all lateral load transfer goes
+# through the springs and bars (docs/19 section 19.3)
+front_roll_centre_height_m = 0.0
+rear_roll_centre_height_m = 0.0
+# Optional, 0 (no bar) when missing. The roll stiffness each bar adds to its axle; docs/19
+# equation 19.7 gets it from the bar's diameter, length and arm length.
+front_anti_roll_bar_stiffness_N_m_per_rad = 0.0
+rear_anti_roll_bar_stiffness_N_m_per_rad = 0.0
 
 # Each corner: wheel rate, damping and end stops, all measured at the wheel.
 # Placeholder values: replace with sourced values.
@@ -104,3 +115,8 @@ bump_gap_m = 0.015
 bump_rate_N_per_m = 1_000_000.0
 droop_gap_m = 0.030
 droop_rate_N_per_m = 1_000_000.0
+
+# Optional: without this table the frame is rigid (docs/19 section 19.8). Measured values
+# are often in N·m/deg: multiply by 57.3 for N·m/rad.
+# [frame]
+# torsional_stiffness_N_m_per_rad = 100_000.0
