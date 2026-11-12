@@ -23,6 +23,23 @@ data/
 The baseline files hold exactly the values of the Rust `Default` impls, so the baseline run
 gives the same results as the code defaults.
 
+## Private data (`private/`)
+
+`data/private/` is in `.gitignore`, so nothing in it is ever committed or pushed. Put real team
+data there (FS RTU car, tyre data, measured tracks) with the same layout as `data/`:
+
+```
+data/private/
+  cars/  tyres/  tracks/  environments/  runs/
+```
+
+Run it the same way: `cargo run -- data/private/runs/<run>.toml`. Paths are relative to the
+file, so a private run can use public files too, e.g. `environment = "../../environments/standard.toml"`.
+
+Check before a commit that nothing private is staged: `git status` must not list `data/private`.
+A file that was committed once stays in the git history even after it is deleted, so never copy
+private values into the public files, docs or tests.
+
 ## Rules for every file
 
 * Every TOML file starts with `format_version = 1`. Any other version is rejected.

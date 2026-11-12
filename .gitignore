@@ -1,1 +1,3 @@
 /target
+# Team data that must never reach GitHub (see data/README.md)
+/data/private/
