@@ -135,6 +135,7 @@ pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
         time_step: run.time_step,
         // Filled by prepare below
         static_values: StaticCarValues::default(),
+        corner_speed_limits: Vec::new(),
     };
 
     simulation_config
@@ -908,5 +909,24 @@ mod tests {
         let message = load_run(&data.run()).unwrap_err();
         assert!(message.contains("straight_1000m.csv"), "{}", message);
         assert!(message.contains("at least 3 points"), "{}", message);
+    }
+
+    #[test]
+    fn test_skidpad_run_loads() {
+        // data/runs/skidpad_5_laps.toml (docs/16 section 16.9)
+        let run = data_folder().join("runs").join("skidpad_5_laps.toml");
+        let loaded = load_run(&run).unwrap();
+
+        assert_eq!(loaded.track.points.len(), 57);
+        assert!((loaded.track.lap_length - 2.0 * std::f64::consts::PI * 9.125).abs() < 0.05);
+        for curvature in &loaded.track.curvatures {
+            assert!((curvature * 9.125 - 1.0).abs() < 1e-3, "{}", curvature);
+        }
+        // The corner speed limits are filled by prepare: 9.02 m/s everywhere
+        assert_eq!(loaded.corner_speed_limits.len(), 57);
+        for limit in &loaded.corner_speed_limits {
+            assert!((limit - 9.02).abs() < 0.005, "{}", limit);
+        }
+        assert!((loaded.initial_car_state.corner_speed_limit - 9.02).abs() < 0.005);
     }
 }

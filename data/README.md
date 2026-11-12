@@ -13,9 +13,11 @@ data/
   tyres/baseline.toml          friction and wheel radius
   tracks/straight_1000m.csv    braking zones
   tracks/oval_244m.csv         XY points of a test oval (docs/15)
+  tracks/skidpad_circle.csv    XY points of one skidpad circle (docs/16)
   environments/standard.toml   air density and gravity
   runs/baseline.toml           picks the files above, time settings and start state
   runs/oval_3_laps.toml        three laps of the oval
+  runs/skidpad_5_laps.toml     five laps of the skidpad circle
 ```
 
 The baseline files hold exactly the values of the Rust `Default` impls, so the baseline run
@@ -81,7 +83,7 @@ end_condition = { laps = 3, max_time_s = 600.0 }
 The rest of the car state is not written in the file, because it follows from the values above
 and the car, track and environment. It is calculated before the run starts
 (`SimulationConfig::prepare`): the active braking zone and whether the car is braking (from
-`distance_m` and the track), the lap, position and curvature on a track with XY points, the locked engine speed (from speed and gear, docs/12 equation 12.2)
+`distance_m` and the track), the lap, position, curvature and corner speed limit on a track with XY points, the locked engine speed (from speed and gear, docs/12 equation 12.2)
 and the acceleration. Writing one of them (e.g. `revs_hz`) is an unknown key error.
 
 ## Car file (`cars/*.toml`)
@@ -216,5 +218,6 @@ same place. Keep the spacing fairly even (about 1 m works well).
 
 From the points the distance to each point, the lap length and the curvature (positive for a left
 turn) are calculated when the file is loaded. The car gets a position, a lap counter and lap
-times. A track with XY points has no braking zones and the car does not slow down for corners
-yet (docs/15 section 15.12), so it drives flat out.
+times. A track with XY points has no braking zones. The car speeds up to the corner speed limit
+of the point it is at and holds it (docs/16). It does not brake before a corner yet, so it can
+arrive too fast, and then brakes in the corner.

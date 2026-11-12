@@ -1,5 +1,6 @@
 # Three laps of the test oval (docs/15 section 15.9) with the baseline car.
-# The car does not slow down for corners yet (docs/15 section 15.12), so the lap times are too fast.
+# The car holds the corner speed limit in the corners (docs/16) but does not brake before them yet,
+# so it arrives too fast and brakes in the corner.
 # Start it with: cargo run -- data/runs/oval_3_laps.toml
 format_version = 1
 

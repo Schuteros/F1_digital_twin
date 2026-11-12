@@ -60,6 +60,27 @@ pub struct CarState {
     /// track without XY points. Calculated from the distance and the track, not in the run file.
     #[serde(skip)]
     pub curvature: f64,
+    /// Corner speed limit at the car in meters per second, m/s (docs/16 section 16.5): the
+    /// lower one of the two points of the track segment. Infinite where there is no limit and
+    /// on a track without XY points. Calculated from the distance, the track and the car, not
+    /// in the run file.
+    #[serde(skip, default = "no_corner_speed_limit")]
+    pub corner_speed_limit: f64,
+    /// Lateral acceleration the line needs at the current speed in meters per second squared,
+    /// m/s^2, always >= 0 (docs/16, equation 16.1). Output only, calculated from the speed and
+    /// the curvature, not in the run file.
+    #[serde(skip)]
+    pub lateral_acceleration: f64,
+    /// True if a tyre needs more lateral force than it can make, so in reality the car would
+    /// run wide (docs/16 section 16.7). Output only, not in the run file.
+    #[serde(skip)]
+    pub over_grip_limit: bool,
+}
+
+/// Corner speed limit of a car state read from a run file, before `prepare` calculates it:
+/// no limit
+fn no_corner_speed_limit() -> f64 {
+    f64::INFINITY
 }
 
 impl Default for CarState {
@@ -79,6 +100,9 @@ impl Default for CarState {
             x: 0.0,
             y: 0.0,
             curvature: 0.0,
+            corner_speed_limit: f64::INFINITY,
+            lateral_acceleration: 0.0,
+            over_grip_limit: false,
         }
     }
 }

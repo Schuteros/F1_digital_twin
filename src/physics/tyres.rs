@@ -4,6 +4,7 @@
 //! [Tyre Friction Documentation](../../docs/03_Tire_Friction_and_Traction.MD)
 //! [Load Sensitivity and Friction Ellipse Documentation](../../docs/14_Tyre_Load_Sensitivity_and_Friction_Ellipse.MD)
 
+use crate::physics::cornering::AxleLateralForces;
 use crate::physics::suspension::CornerLoads;
 use serde::Deserialize;
 
@@ -71,15 +72,23 @@ pub(crate) struct AxleGrip {
 /// loads. Each tyre is calculated on its own and then summed, so the loss from load transfer
 /// between the left and right tyre is kept (docs/14 sections 14.3 and 14.5).
 ///
-/// The car only drives straight, so the lateral force of every tyre is 0 for now.
-pub(crate) fn calculate_axle_grip(tyre: &Tyre, tyre_loads: &CornerLoads) -> AxleGrip {
-    let lateral_force = 0.0;
-    let tyre_grip =
-        |tyre_load: f64| calculate_available_longitudinal_force(tyre, tyre_load, lateral_force);
+/// `axle_lateral_forces` are the lateral forces the corner needs from each axle (docs/16,
+/// equation 16.4). Each tyre makes half of its axle's force, and the friction ellipse gives
+/// the longitudinal force that is left (docs/16 section 16.4). 0 on a straight.
+pub(crate) fn calculate_axle_grip(
+    tyre: &Tyre,
+    tyre_loads: &CornerLoads,
+    axle_lateral_forces: &AxleLateralForces,
+) -> AxleGrip {
+    let tyre_grip = |tyre_load: f64, axle_lateral_force: f64| {
+        calculate_available_longitudinal_force(tyre, tyre_load, 0.5 * axle_lateral_force)
+    };
 
     AxleGrip {
-        front: tyre_grip(tyre_loads.front_left) + tyre_grip(tyre_loads.front_right),
-        rear: tyre_grip(tyre_loads.rear_left) + tyre_grip(tyre_loads.rear_right),
+        front: tyre_grip(tyre_loads.front_left, axle_lateral_forces.front)
+            + tyre_grip(tyre_loads.front_right, axle_lateral_forces.front),
+        rear: tyre_grip(tyre_loads.rear_left, axle_lateral_forces.rear)
+            + tyre_grip(tyre_loads.rear_right, axle_lateral_forces.rear),
     }
 }
 
@@ -196,11 +205,13 @@ pub(crate) fn calculate_axle_grip_from_axle_loads(
             rear_left: axle_loads.rear / 2.0,
             rear_right: axle_loads.rear / 2.0,
         },
+        &AxleLateralForces::default(),
     )
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::physics::cornering::AxleLateralForces;
     use crate::physics::loads::AxleLoads;
     use crate::physics::suspension::CornerLoads;
     use crate::physics::tyres::{
@@ -332,6 +343,7 @@ mod tests {
                 front_right: 700.0,
                 ..CornerLoads::default()
             },
+            &AxleLateralForces::default(),
         );
         let transferred = calculate_axle_grip(
             &tyre,
@@ -340,6 +352,7 @@ mod tests {
                 front_right: 400.0,
                 ..CornerLoads::default()
             },
+            &AxleLateralForces::default(),
         );
 
         // Outside: 1.6 * (1 - 0.2 * 300 / 700) * 1000 N = 1462.857 N
@@ -490,5 +503,42 @@ mod tests {
         // Front: 4500 N / 0.625 = 7200 N, rear: 2700 N / 0.375 = 7200 N
         // Both axles saturate together, expected value: 0.9 * 8000 N = 7200 N
         assert!((limit - 7200.0).abs() < 1e-9, "Calculated limit: {}", limit);
+    }
+
+    #[test]
+    fn test_axle_grip_with_lateral_force() {
+        // docs/16 section 16.4: front tyres at 2026.3 N, mu_x = mu_y = 0.9 -> 1823.67 N each
+        // way. The corner needs 2718.3 N from the axle, 1359.16 N per tyre:
+        // F_x,avail = 1823.67 * sqrt(1 - (1359.16 / 1823.67)^2) = 1215.92 N per tyre
+        let tyre = Tyre::default();
+        let tyre_loads = CornerLoads {
+            front_left: 2026.301471,
+            front_right: 2026.301471,
+            rear_left: 2000.0,
+            rear_right: 2000.0,
+        };
+        let axle_lateral_forces = AxleLateralForces {
+            front: 2718.314645,
+            rear: 0.0,
+        };
+
+        let axle_grip = calculate_axle_grip(&tyre, &tyre_loads, &axle_lateral_forces);
+        assert!(
+            (axle_grip.front - 2.0 * 1215.922888).abs() < 1e-4,
+            "{:?}",
+            axle_grip
+        );
+        // No lateral force on the rear: the whole grip is longitudinal
+        assert!((axle_grip.rear - 3600.0).abs() < 1e-9, "{:?}", axle_grip);
+
+        // An axle beyond its lateral limit has nothing left
+        let too_much = AxleLateralForces {
+            front: 4000.0,
+            rear: 0.0,
+        };
+        assert_eq!(
+            calculate_axle_grip(&tyre, &tyre_loads, &too_much).front,
+            0.0
+        );
     }
 }

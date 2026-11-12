@@ -6,7 +6,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 /// Column names of the log, in the order `write_row` writes them
-const HEADER: [&str; 17] = [
+const HEADER: [&str; 20] = [
     "time_s",
     "distance_m",
     "speed_m_per_s",
@@ -24,6 +24,9 @@ const HEADER: [&str; 17] = [
     "x_m",
     "y_m",
     "curvature_1_per_m",
+    "corner_speed_limit_m_per_s",
+    "lateral_acceleration_m_per_s2",
+    "over_grip_limit",
 ];
 
 /// CSV log of the car state: one row at the start, then one every `every_steps` steps, and
@@ -90,7 +93,7 @@ impl CarStateLog {
         let car = &state.car;
         let suspension = &car.suspension;
         let row = format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             state.time,
             car.distance,
             car.speed,
@@ -108,6 +111,9 @@ impl CarStateLog {
             car.x,
             car.y,
             car.curvature,
+            car.corner_speed_limit,
+            car.lateral_acceleration,
+            car.over_grip_limit,
         );
         self.write_line(&row);
     }

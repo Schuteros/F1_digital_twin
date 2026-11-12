@@ -51,6 +51,40 @@ pub(crate) fn calculate_net_force(
     }
 }
 
+/// Calculates the net longitudinal force on the car in Newtons, N, positive forward, for a
+/// driver who asks for the acceleration `wanted_acceleration` in m/s^2 (docs/16 section 16.7).
+///
+/// The car gives as much of it as it can: the force is never above the full-throttle net force
+/// and never below the threshold braking net force, both from `calculate_net_force`. In
+/// between the driver uses part throttle, coasts or uses part of the brakes.
+pub(crate) fn calculate_net_force_for_wanted_acceleration(
+    car: &Car,
+    car_state: &CarState,
+    axle_loads: &AxleLoads,
+    axle_grip: &AxleGrip,
+    aero_loads: &AeroLoads,
+    wanted_acceleration: f64,
+) -> f64 {
+    let net_force = |braking: bool| {
+        calculate_net_force(
+            car,
+            &CarState {
+                braking,
+                ..*car_state
+            },
+            axle_loads,
+            axle_grip,
+            aero_loads,
+        )
+    };
+    let full_throttle_force = net_force(false);
+    let full_braking_force = net_force(true);
+
+    (car.mass.total * wanted_acceleration)
+        .max(full_braking_force)
+        .min(full_throttle_force)
+}
+
 /// Calculates resistive losses in Newtons, N: rolling (or breakaway) tyre friction and air drag.
 /// Brake force is not included, it is added separately in the braking branch of the net force.
 fn calculate_force_losses(
@@ -110,7 +144,8 @@ mod tests {
     use crate::physics::aero::{AeroLoads, calculate_aero_loads};
     use crate::physics::forces::{
         calculate_acceleration, calculate_force_losses, calculate_net_force,
-        calculate_normal_force, calculate_powertrain_force_tyre_traction_limited,
+        calculate_net_force_for_wanted_acceleration, calculate_normal_force,
+        calculate_powertrain_force_tyre_traction_limited,
     };
     use crate::physics::loads::AxleLoads;
     use crate::physics::powertrain::{Drivetrain, Powertrain};
@@ -434,5 +469,58 @@ mod tests {
         // Traction limited force = 3600 N, breakaway friction = 8000 * 0.7 = 5600 N
         // Breakaway friction can't push the car backwards, so expected value: 0 N
         assert_eq!(net_force, 0.0);
+    }
+
+    #[test]
+    fn test_net_force_for_wanted_acceleration() {
+        // docs/16 section 16.7: the driver gets the wanted acceleration if the car can give it
+        let simulation_config = prepared_config();
+        let car = &simulation_config.car;
+        let car_state = CarState {
+            speed: 20.0,
+            gear: 2,
+            ..CarState::default()
+        };
+        let axle_loads = default_static_axle_loads();
+        let axle_grip = default_static_axle_grip();
+        let aero_loads = calculate_aero_loads(&car.aero, 1.225, car_state.speed);
+        let net_force = |wanted_acceleration: f64| {
+            calculate_net_force_for_wanted_acceleration(
+                car,
+                &car_state,
+                &axle_loads,
+                &axle_grip,
+                &aero_loads,
+                wanted_acceleration,
+            )
+        };
+        let limit_force = |braking: bool| {
+            calculate_net_force(
+                car,
+                &CarState {
+                    braking,
+                    ..car_state
+                },
+                &axle_loads,
+                &axle_grip,
+                &aero_loads,
+            )
+        };
+        let full_throttle_force = limit_force(false);
+        let full_braking_force = limit_force(true);
+        assert!(full_braking_force < 0.0 && full_throttle_force > 0.0);
+
+        // No limit ahead: full throttle. Far too fast: full braking.
+        assert_eq!(net_force(f64::INFINITY), full_throttle_force);
+        assert_eq!(net_force(1000.0), full_throttle_force);
+        assert_eq!(net_force(-1000.0), full_braking_force);
+        assert_eq!(net_force(f64::NEG_INFINITY), full_braking_force);
+
+        // In between: exactly m * a, for part throttle, holding the speed and part braking
+        for wanted_acceleration in [1.0, 0.0, -1.0] {
+            let expected = car.mass.total * wanted_acceleration;
+            assert!(expected > full_braking_force && expected < full_throttle_force);
+            assert!((net_force(wanted_acceleration) - expected).abs() < 1e-9);
+        }
     }
 }
