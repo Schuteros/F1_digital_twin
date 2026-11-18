@@ -258,9 +258,11 @@ Both keys are optional with these defaults. `max_line_offset_m` must be > 0,
 * **Skidpad** (R 9.125 m): speeding up close to the limit the front runs about 1 mm wide, the
   driver eases off by 20.6a and the car ends on the line at the limit. Flying laps 6.3521 s, as
   before.
-* **Oval with trials, no margin:** braking points 0.09 m later than the docs/17 plan (docs/18 had
-  0.98 m earlier), the car stays within 1 cm of the line, flying laps 16.743 s (docs/18:
-  16.844 s). Faster, because a step a hair over the limit no longer fails a trial.
+* **Oval run file** (`grip_margin = 0.05`, trials): braking points 0.09 m later than the docs/17
+  plan (docs/18 had 0.98 m earlier), the car stays within 1 cm of the line, flying laps 16.743 s
+  (docs/18: 16.844 s). Faster, because a step a hair over the limit no longer fails a trial.
+* **The same with `grip_margin = 0.0`:** braking points again 0.09 m later than the plan (docs/18:
+  0.98 m earlier), flying laps 16.426 s (docs/18: 16.493 s).
 * **Oval, grip 0.9x of the plan** (the planning tyre is the full tyre, the real one has 10 % less):
   the car runs about 1.1 m wide in each R 15 m corner, brakes with the share $\beta$, gets back on
   the straights, and every lap is invalid with the default 0.5 m margin.
