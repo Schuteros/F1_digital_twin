@@ -10,6 +10,7 @@ pub mod driver;
 mod environment;
 mod forces;
 mod integrators;
+mod line_offset;
 mod loads;
 mod powertrain;
 mod roll;

@@ -44,6 +44,27 @@ pub struct Driver {
     /// (docs/18). false = the docs/17 plan as it is.
     #[serde(default)]
     pub braking_point_trials: bool,
+
+    /// Furthest the car may be from the line in meters, m (n_max, docs/20 section 20.7). A lap
+    /// where the car goes further is invalid, the run goes on.
+    #[serde(rename = "max_line_offset_m", default = "default_max_line_offset")]
+    pub max_line_offset: f64,
+
+    /// Share of the longitudinal grip the driver brakes with while the car is over the grip
+    /// limit (beta, docs/20 section 20.6), dimensionless, 0.0 to 1.0. The rest of the grip
+    /// turns the car.
+    #[serde(default = "default_over_limit_braking_share")]
+    pub over_limit_braking_share: f64,
+}
+
+/// Allowed offset from the line without a `max_line_offset_m` key in meters, m
+fn default_max_line_offset() -> f64 {
+    0.5
+}
+
+/// Braking share over the grip limit without an `over_limit_braking_share` key
+fn default_over_limit_braking_share() -> f64 {
+    0.3
 }
 
 impl Default for Driver {
@@ -51,6 +72,8 @@ impl Default for Driver {
         Self {
             grip_margin: 0.0,
             braking_point_trials: false,
+            max_line_offset: default_max_line_offset(),
+            over_limit_braking_share: default_over_limit_braking_share(),
         }
     }
 }

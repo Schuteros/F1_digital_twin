@@ -145,6 +145,7 @@ pub fn load_run(path: &Path) -> Result<SimulationConfig, String> {
         corner_speed_limits: Vec::new(),
         target_speeds: Vec::new(),
         braking_points: Vec::new(),
+        braking_point_warnings: Vec::new(),
     };
 
     simulation_config
@@ -1040,5 +1041,39 @@ mod tests {
         assert_eq!(loaded.driver.grip_margin, 0.0);
         // A track with braking zones has no corners to correct
         assert!(loaded.braking_points.is_empty());
+        // docs/20: without the keys, a 0.5 m margin and a braking share of 0.3
+        assert_eq!(loaded.driver.max_line_offset, 0.5);
+        assert_eq!(loaded.driver.over_limit_braking_share, 0.3);
+
+        // docs/20 section 20.9: both keys read, and checked
+        let data = TempData::new("driver_run_wide");
+        data.replace(
+            "runs/baseline.toml",
+            table,
+            "[driver]\nmax_line_offset_m = 1.5\nover_limit_braking_share = 0.0\n\n[initial_state]",
+        );
+        let loaded = load_run(&data.run()).unwrap();
+        assert_eq!(loaded.driver.max_line_offset, 1.5);
+        assert_eq!(loaded.driver.over_limit_braking_share, 0.0);
+
+        for (key, message_part) in [
+            (
+                "max_line_offset_m = 0.0",
+                "driver.max_line_offset_m must be > 0 m",
+            ),
+            (
+                "over_limit_braking_share = 1.2",
+                "driver.over_limit_braking_share must be in 0.0..=1.0",
+            ),
+        ] {
+            let data = TempData::new("driver_run_wide_range");
+            data.replace(
+                "runs/baseline.toml",
+                table,
+                &format!("[driver]\n{}\n\n[initial_state]", key),
+            );
+            let message = load_run(&data.run()).unwrap_err();
+            assert!(message.contains(message_part), "{}", message);
+        }
     }
 }

@@ -32,6 +32,11 @@ grip_margin = 0.05
 # simulation until the car gets through the corner without going over the limit (docs/18).
 # false or missing = the docs/17 plan as it is.
 braking_point_trials = true
+# Furthest the car may be from the line. A lap that goes further is invalid, the run goes on (docs/20).
+max_line_offset_m = 0.5
+# Over the grip limit the driver brakes with this share of the grip and turns with the rest
+# (docs/20 section 20.6). 0.0 = turn only, 1.0 = brake only.
+over_limit_braking_share = 0.3
 
 # Starting conditions of the car at start_time_s: on the start/finish line (distance 0),
 # already rolling at 10 m/s, in 1st gear, not shifting.

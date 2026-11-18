@@ -97,6 +97,13 @@ fn main() -> ExitCode {
             } else {
                 println!("Lap {:<3}       : {:.4} s", index + 1, lap_time);
             }
+            // docs/20 section 20.7
+            if final_state.is_lap_invalid(index, config.driver.max_line_offset) {
+                println!(
+                    "                invalid: up to {:.3} m from the line (max_line_offset_m = {} m)",
+                    final_state.lap_max_line_offsets[index], config.driver.max_line_offset
+                );
+            }
         }
 
         // Braking points corrected by trial runs (docs/18 section 18.7)
@@ -108,6 +115,11 @@ fn main() -> ExitCode {
                     braking_point.apex_distance, braking_point.shift
                 );
             }
+        }
+
+        // Corners the braking point trials could not fix (docs/20 section 20.8)
+        for warning in &config.braking_point_warnings {
+            println!("Warning: {}", warning);
         }
 
         if let EndCondition::Laps { laps, max_time } = config.end_condition

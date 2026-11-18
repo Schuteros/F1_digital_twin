@@ -17,6 +17,11 @@ use crate::physics::forces::{
     calculate_acceleration, calculate_net_force, calculate_net_force_for_wanted_acceleration,
 };
 use crate::physics::integrators::euler;
+use crate::physics::line_offset::{
+    LinePosition, calculate_lateral_grip_ratio, calculate_line_progress_speed,
+    calculate_return_speed_factor, calculate_turning_share, calculate_wanted_curvature,
+    update_line_position,
+};
 use crate::physics::loads::AxleLoads;
 use crate::physics::powertrain::{
     Drivetrain, Powertrain, calculate_engine_revs_from_wheel_speed, count_down_shift_time,
@@ -154,6 +159,9 @@ pub struct SimulationConfig {
     /// The braking point of every corner found by trial runs (docs/18), in driving order.
     /// Empty without `driver.braking_point_trials`, filled by `prepare`.
     pub braking_points: Vec<BrakingPoint>,
+    /// Warnings from the braking point trials (docs/20 section 20.8), filled by `prepare`.
+    /// Empty without trials.
+    pub braking_point_warnings: Vec<String>,
 }
 
 impl Default for SimulationConfig {
@@ -171,6 +179,7 @@ impl Default for SimulationConfig {
             corner_speed_limits: Vec::new(),
             target_speeds: Vec::new(),
             braking_points: Vec::new(),
+            braking_point_warnings: Vec::new(),
         }
     }
 }
@@ -186,6 +195,11 @@ pub(crate) struct SimulationState {
     /// Time the current lap started in seconds, s: the start time, then the last time the car
     /// crossed the start/finish line (docs/15, equation 15.9)
     pub(crate) lap_start_time: f64,
+    /// Largest distance from the line of every lap completed in this run in meters, m (docs/20
+    /// section 20.7), in the order of `lap_times`
+    pub(crate) lap_max_line_offsets: Vec<f64>,
+    /// Largest distance from the line so far in the current lap in meters, m
+    pub(crate) current_lap_max_line_offset: f64,
 }
 
 impl SimulationState {
@@ -195,7 +209,19 @@ impl SimulationState {
             time: config.start_time,
             lap_times: Vec::new(),
             lap_start_time: config.start_time,
+            lap_max_line_offsets: Vec::new(),
+            current_lap_max_line_offset: config.initial_car_state.line_offset.abs(),
         }
+    }
+}
+
+impl SimulationState {
+    /// Checks if lap `index` (0 = the first lap of the run) went further from the line than
+    /// `max_line_offset` in meters, m (docs/20 section 20.7)
+    pub fn is_lap_invalid(&self, index: usize, max_line_offset: f64) -> bool {
+        self.lap_max_line_offsets
+            .get(index)
+            .is_some_and(|&offset| offset > max_line_offset)
     }
 }
 
@@ -213,11 +239,15 @@ pub(crate) struct StepLoads {
     /// Longitudinal grip limit of each axle from the corner tyre loads in Newtons, N (docs/14),
     /// after the lateral force the corner needs (docs/16 section 16.4)
     pub axle_grip: AxleGrip,
-    /// Lateral acceleration the line needs at the speed the step starts from in m/s^2 (docs/16,
-    /// equation 16.1), positive to the left
+    /// Lateral acceleration the tyres give the car at the speed the step starts from in m/s^2,
+    /// positive to the left: what the driver asks for (docs/20, equation 20.7), or less over
+    /// the grip limit (docs/20 section 20.5)
     pub lateral_acceleration: f64,
-    /// True if a tyre needs more lateral force than it can make (docs/16 section 16.7)
+    /// True if the tyres can not make the lateral force the driver asks for (docs/16 section
+    /// 16.7, docs/20 section 20.5). The driver then brakes with the over-limit braking share.
     pub over_grip_limit: bool,
+    /// Path curvature the driver asks for in 1/m (docs/20, equation 20.6)
+    pub wanted_curvature: f64,
     /// Drag and downforce at the speed the step starts from in Newtons, N
     pub aero_loads: AeroLoads,
 }
@@ -331,6 +361,7 @@ pub(crate) fn simulation_step(
     // of the step (docs/13 section 13.5), then a_x. The powertrain force is the full-throttle
     // force in the gear (12.10), 0 while shift_time_left > 0, capped at the tyre grip limit.
     let step_loads = calculate_step_loads(simulation_config, &simulation_state.car);
+    let step_speed = simulation_state.car.speed;
     simulation_state.car.lateral_acceleration = step_loads.lateral_acceleration;
     simulation_state.car.over_grip_limit = step_loads.over_grip_limit;
     simulation_state.car.tyre_loads = step_loads.tyre_loads;
@@ -383,13 +414,41 @@ pub(crate) fn simulation_step(
         simulation_config.time_step,
     );
 
-    // Step 7: update positions with the new velocities (semi-implicit Euler)
+    // Step 7: update positions with the new velocities (semi-implicit Euler). Off the line the
+    // car moves along it at the speed of docs/20 equation 20.3, and the offset and heading
+    // error move on by 20.4 and 20.5.
     let old_distance = simulation_state.car.distance;
-    simulation_state.car.distance = get_car_distance(
-        &simulation_state.car,
-        simulation_config,
-        simulation_state.car.speed,
-    );
+    let progress_speed = if simulation_config.track.has_line() {
+        let car = &mut simulation_state.car;
+        let progress_speed = calculate_line_progress_speed(
+            car.speed,
+            car.curvature,
+            car.line_offset,
+            car.heading_error,
+        );
+        let line_position = update_line_position(
+            LinePosition {
+                offset: car.line_offset,
+                heading_error: car.heading_error,
+            },
+            car.speed,
+            calculate_path_curvature(step_loads.lateral_acceleration, step_speed),
+            car.curvature,
+            progress_speed,
+            simulation_config.time_step,
+        );
+        car.line_offset = line_position.offset;
+        car.heading_error = line_position.heading_error;
+        car.outside_margin = car.line_offset.abs() > simulation_config.driver.max_line_offset;
+        simulation_state.current_lap_max_line_offset = simulation_state
+            .current_lap_max_line_offset
+            .max(car.line_offset.abs());
+        progress_speed
+    } else {
+        simulation_state.car.speed
+    };
+    simulation_state.car.distance =
+        get_car_distance(&simulation_state.car, simulation_config, progress_speed);
 
     // Laps completed inside this step and the position on the track (docs/15)
     if simulation_config.track.has_line() {
@@ -434,6 +493,10 @@ fn record_completed_laps(
             .lap_times
             .push(crossing_time - simulation_state.lap_start_time);
         simulation_state.lap_start_time = crossing_time;
+        simulation_state
+            .lap_max_line_offsets
+            .push(simulation_state.current_lap_max_line_offset);
+        simulation_state.current_lap_max_line_offset = simulation_state.car.line_offset.abs();
         simulation_state.car.lap += 1;
     }
 }
@@ -519,61 +582,80 @@ pub(crate) fn calculate_step_loads(
         &car_state.suspension,
     );
 
-    // Lateral force the line needs from each axle (docs/16 sections 16.2 and 16.3). The
-    // curvature is 0 on a track without XY points, so this is all 0 there.
+    // Lateral force the driver asks for from each axle: the line's curvature and the turn
+    // back to the line (docs/20 equations 20.6 and 20.7, docs/16 sections 16.2 and 16.3). The
+    // curvature is 0 on a track without XY points, and the car never leaves the line there.
     let tyre = &simulation_config.car.tyre;
-    let lateral_acceleration = calculate_lateral_acceleration(car_state.speed, car_state.curvature);
-    let axle_lateral_forces = calculate_axle_lateral_forces(
-        simulation_config.car.mass.total,
-        lateral_acceleration,
+    let mass = simulation_config.car.mass.total;
+    let wanted_curvature = calculate_wanted_curvature(
+        car_state.curvature,
+        car_state.line_offset,
+        car_state.heading_error,
+    );
+    let wanted_lateral_acceleration =
+        calculate_lateral_acceleration(car_state.speed, wanted_curvature);
+    let wanted_lateral_forces = calculate_axle_lateral_forces(
+        mass,
+        wanted_lateral_acceleration,
         &static_values.axle_distances,
     );
     // The links carry part of the lateral load transfer straight to the tyres (docs/19,
     // equations 19.14 and 19.15)
-    let tyre_loads = calculate_corner_tyre_loads(
-        &static_values.static_corner_loads,
-        &corner_forces,
-        &calculate_geometric_transfer(&static_values.roll, &axle_lateral_forces),
-    );
+    let tyre_loads_for = |axle_lateral_forces: &AxleLateralForces| {
+        calculate_corner_tyre_loads(
+            &static_values.static_corner_loads,
+            &corner_forces,
+            &calculate_geometric_transfer(&static_values.roll, axle_lateral_forces),
+        )
+    };
+    let wanted_tyre_loads = tyre_loads_for(&wanted_lateral_forces);
     let over_grip_limit = is_over_lateral_grip(
         tyre,
-        &tyre_loads,
-        &axle_lateral_forces,
+        &wanted_tyre_loads,
+        &wanted_lateral_forces,
         OVER_GRIP_LIMIT_MARGIN,
     );
 
-    // A car that is over the grip limit and too fast cannot hold the line anyway, so the driver
-    // uses the whole grip for braking in a straight line (docs/16 section 16.7, docs/17
-    // section 17.6)
-    let ellipse_lateral_forces = if over_grip_limit && is_above_target_speed(car_state) {
-        AxleLateralForces::default()
+    // Over the limit the driver brakes with the braking share and turns with the lateral grip
+    // that is left, limited by the axle that runs out first (docs/20 equations 20.8 and 20.10).
+    // The tyre loads are then those of the smaller lateral force.
+    let (lateral_acceleration, axle_lateral_forces, tyre_loads) = if over_grip_limit {
+        let scale = calculate_lateral_grip_ratio(tyre, &wanted_tyre_loads, &wanted_lateral_forces)
+            .min(1.0)
+            * calculate_turning_share(simulation_config.driver.over_limit_braking_share);
+        let lateral_acceleration = wanted_lateral_acceleration * scale;
+        let axle_lateral_forces = calculate_axle_lateral_forces(
+            mass,
+            lateral_acceleration,
+            &static_values.axle_distances,
+        );
+        (
+            lateral_acceleration,
+            axle_lateral_forces,
+            tyre_loads_for(&axle_lateral_forces),
+        )
     } else {
-        axle_lateral_forces
+        (
+            wanted_lateral_acceleration,
+            wanted_lateral_forces,
+            wanted_tyre_loads,
+        )
     };
 
     StepLoads {
         corner_forces,
         tyre_loads,
         axle_loads: sum_axle_loads(&tyre_loads),
-        axle_grip: calculate_axle_grip(tyre, &tyre_loads, &ellipse_lateral_forces),
+        axle_grip: calculate_axle_grip(tyre, &tyre_loads, &axle_lateral_forces),
         lateral_acceleration,
         over_grip_limit,
+        wanted_curvature,
         aero_loads: calculate_aero_loads(
             &simulation_config.car.aero,
             simulation_config.environment.air_density,
             car_state.speed,
         ),
     }
-}
-
-/// Speeds within this fraction above the target speed count as on the target. The margin only
-/// keeps rounding errors of a car that holds the target from being seen as too fast.
-const TARGET_SPEED_TOLERANCE: f64 = 1e-9;
-
-/// Checks if the car is faster than the driver wants it to be after this step (docs/17
-/// section 17.6)
-fn is_above_target_speed(car_state: &CarState) -> bool {
-    car_state.speed > car_state.target_speed * (1.0 + TARGET_SPEED_TOLERANCE)
 }
 
 /// Calculates car acceleration a_x in m/s^2 from the loads at the start of the step.
@@ -583,7 +665,8 @@ fn is_above_target_speed(car_state: &CarState) -> bool {
 ///
 /// On a track with XY points the driver asks for the acceleration that brings the car to the
 /// target speed in this step, and gets as much of it as the car can give (docs/16 section
-/// 16.7, docs/17 section 17.6). On a track with braking zones the car is at full throttle or full braking.
+/// 16.7, docs/17 section 17.6). Over the grip limit it brakes with the braking share of the
+/// grip instead (docs/20 section 20.6). On a track with braking zones the car is at full throttle or full braking.
 pub(crate) fn get_car_acceleration(
     simulation_config: &SimulationConfig,
     car_state: &CarState,
@@ -597,11 +680,21 @@ pub(crate) fn get_car_acceleration(
             &step_loads.axle_loads,
             &step_loads.axle_grip,
             &step_loads.aero_loads,
-            calculate_wanted_acceleration(
-                car_state.speed,
-                car_state.target_speed,
-                simulation_config.time_step,
-            ),
+            // Over the grip limit: no throttle, brake as hard as the braking share of the grip
+            // allows (docs/20 section 20.6)
+            if step_loads.over_grip_limit {
+                f64::NEG_INFINITY
+            } else {
+                calculate_wanted_acceleration(
+                    car_state.speed,
+                    car_state.target_speed
+                        * calculate_return_speed_factor(
+                            car_state.curvature,
+                            step_loads.wanted_curvature,
+                        ),
+                    simulation_config.time_step,
+                )
+            },
         )
     } else {
         calculate_net_force(
@@ -625,7 +718,19 @@ fn get_car_speed(
     euler(car_state.speed, acceleration, simulation_config.time_step)
 }
 
-/// Calculates car distance given the current car model, state, environment model and simulation_config.
+/// Calculates the curvature of the path the car drives in 1/m from the lateral acceleration
+/// `lateral_acceleration` in m/s^2 the tyres give it at `speed` in m/s: kappa_car = a_y / v^2
+/// (docs/20, equation 20.9). 0 for a car that is not moving.
+fn calculate_path_curvature(lateral_acceleration: f64, speed: f64) -> f64 {
+    if speed > 0.0 {
+        lateral_acceleration / (speed * speed)
+    } else {
+        0.0
+    }
+}
+
+/// Calculates car distance along the line given the current car state, simulation_config and
+/// the speed along the line `speed` in m/s (docs/20, equation 20.3).
 fn get_car_distance(car_state: &CarState, simulation_config: &SimulationConfig, speed: f64) -> f64 {
     euler(car_state.distance, speed, simulation_config.time_step)
 }
@@ -669,8 +774,9 @@ impl SimulationConfig {
         // docs/18: braking points corrected with trial runs of the full simulation, which
         // start from the initial car state. Then the initial state again with the new targets.
         self.braking_points = Vec::new();
+        self.braking_point_warnings = Vec::new();
         if self.driver.braking_point_trials && self.track.has_line() {
-            self.braking_points = correct_braking_points(self)?;
+            (self.braking_points, self.braking_point_warnings) = correct_braking_points(self);
             self.initial_car_state = calculate_initial_car_state(self);
         }
 
@@ -776,6 +882,21 @@ impl SimulationConfig {
 
         validate_end_condition(&self.end_condition, self.start_time, &self.track)?;
 
+        // docs/20 section 20.9
+        let max_line_offset = self.driver.max_line_offset;
+        if !(max_line_offset > 0.0 && max_line_offset.is_finite()) {
+            return Err(format!(
+                "driver.max_line_offset_m must be > 0 m, got {}",
+                max_line_offset
+            ));
+        }
+        let braking_share = self.driver.over_limit_braking_share;
+        if !(0.0..=1.0).contains(&braking_share) {
+            return Err(format!(
+                "driver.over_limit_braking_share must be in 0.0..=1.0, got {}",
+                braking_share
+            ));
+        }
         // A margin of 1 would leave the planning tyre without any grip (docs/17, equation 17.1)
         let grip_margin = self.driver.grip_margin;
         if !(0.0..1.0).contains(&grip_margin) {
@@ -2785,18 +2906,32 @@ mod tests {
             max_speed,
             limit
         );
+        // Speeding up close to the limit the front runs about 1 mm wide (docs/16 section 16.7).
+        // The driver eases off a little to get back (docs/20 section 20.4), and the car ends on
+        // the line at the limit.
+        assert!(simulation_state.lap_max_line_offsets[0] < 0.002);
+        assert!(simulation_state.car.line_offset.abs() < 1e-9);
         assert!((simulation_state.car.speed - limit).abs() < 1e-9);
         assert!(simulation_state.car.acceleration.abs() < 1e-9);
-        // Once the speed has settled, no tyre is over its limit
+        // Once settled, no tyre is over its limit
         assert!(!over_limit_after_first_lap);
 
-        // Flying laps: lap length / limit = 6.35 s. Lap 1 includes the speeding up.
+        // Flying laps: lap length / limit = 6.35 s. Lap 1 includes the speeding up, lap 2 the
+        // last micrometres back to the line.
         let lap_length = simulation_config.track.lap_length;
-        for lap_time in &simulation_state.lap_times[1..] {
-            assert!((lap_time - lap_length / limit).abs() < 1e-6, "{}", lap_time);
-            assert!((lap_time - 6.35).abs() < 0.005, "{}", lap_time);
-        }
-        assert!(simulation_state.lap_times[0] > simulation_state.lap_times[1]);
+        let lap_times = &simulation_state.lap_times;
+        assert!(
+            (lap_times[1] - lap_length / limit).abs() < 1e-3,
+            "{}",
+            lap_times[1]
+        );
+        assert!(
+            (lap_times[2] - lap_length / limit).abs() < 1e-6,
+            "{}",
+            lap_times[2]
+        );
+        assert!((lap_times[2] - 6.35).abs() < 0.005, "{}", lap_times[2]);
+        assert!(lap_times[0] > lap_times[1]);
 
         // a_y = v^2 / R = 9.02^2 / 9.125 = 8.92 m/s^2
         assert!((simulation_state.car.lateral_acceleration - limit * limit / 9.125).abs() < 0.01);
@@ -2850,6 +2985,8 @@ mod tests {
                 over_limit_after_first_lap = true;
             }
         }
+        // Back on the line at the limit (docs/20 section 20.4)
+        assert!(simulation_state.car.line_offset.abs() < 1e-9);
         assert!((simulation_state.car.speed - limit).abs() < 1e-9);
         assert!(!over_limit_after_first_lap);
         // Left turn: rolls to the right, the front half a little less than the rear (the
@@ -2891,14 +3028,20 @@ mod tests {
     }
 
     #[test]
-    fn test_too_fast_into_corner_is_over_grip_limit() {
-        // docs/16 section 16.7: a car that arrives at a corner far too fast. The braking plan
-        // of docs/17 is taken out below, so nothing brakes before the first corner of the oval.
+    fn test_too_fast_into_corner_runs_off() {
+        // docs/16 section 16.7, docs/20 section 20.3: a car that arrives at a corner far too
+        // fast, about twice the corner speed limit. The braking plan of docs/17 is taken out
+        // below, so nothing brakes before the first corner of the oval. The car leaves the
+        // margin by metres, but the run goes on and the numbers stay finite.
         let mut simulation_config = SimulationConfig {
             track: oval_track(),
             initial_car_state: CarState {
                 distance: 0.0,
                 ..CarState::default()
+            },
+            end_condition: EndCondition::Laps {
+                laps: 1,
+                max_time: 120.0,
             },
             ..SimulationConfig::default()
         };
@@ -2911,26 +3054,83 @@ mod tests {
 
         let mut simulation_state = SimulationState::new(&simulation_config);
         let mut was_over_grip_limit = false;
-        let mut braked_in_corner = false;
-        // Until the car is in the middle of the first corner
-        while simulation_state.car.track_segment < 75 + 23 {
+        let mut largest_offset: f64 = 0.0;
+        while simulation_state.lap_times.is_empty() && simulation_state.time < 120.0 {
             // Point 0 joins the last corner to the straight, so the first segment still curves
-            let on_straight = (1..73).contains(&simulation_state.car.track_segment);
+            let on_first_straight = simulation_state.car.lap == 0
+                && (1..73).contains(&simulation_state.car.track_segment);
             simulation_step(&mut simulation_state, &simulation_config);
+            let car = &simulation_state.car;
+            assert!(car.line_offset.is_finite() && car.speed.is_finite());
 
-            if on_straight {
+            if on_first_straight {
                 // Full throttle and nothing to hold on the straight
-                assert!(simulation_state.car.acceleration > 0.0);
-                assert!(!simulation_state.car.over_grip_limit);
-                assert_eq!(simulation_state.car.lateral_acceleration, 0.0);
+                assert!(car.acceleration > 0.0);
+                assert!(!car.over_grip_limit);
+                assert!(car.lateral_acceleration.abs() < 1e-9);
             } else {
-                was_over_grip_limit |= simulation_state.car.over_grip_limit;
-                braked_in_corner |= simulation_state.car.acceleration < -5.0;
+                was_over_grip_limit |= car.over_grip_limit;
+                largest_offset = largest_offset.max(car.line_offset.abs());
+                if car.over_grip_limit {
+                    // Over the limit: braking, never throttle (docs/20 section 20.6)
+                    assert!(car.acceleration < 0.0);
+                }
             }
         }
 
         assert!(was_over_grip_limit);
-        assert!(braked_in_corner);
+        assert!(largest_offset > 2.0, "{}", largest_offset);
+        // The lap is finished, and invalid
+        assert_eq!(simulation_state.lap_times.len(), 1);
+        assert!(simulation_state.is_lap_invalid(0, simulation_config.driver.max_line_offset));
+    }
+
+    #[test]
+    fn test_less_grip_than_planned_runs_wide_and_back() {
+        // docs/20 section 20.2: the driver plans with the full tyre, but the real tyre has only
+        // 0.9x of the grip. The car runs wide in every corner and gets back to the line on the
+        // straights.
+        let mut simulation_config = oval_config(0.0);
+        simulation_config.car.tyre.mu_x_ref *= 0.9;
+        simulation_config.car.tyre.mu_y_ref *= 0.9;
+        let braking_share = simulation_config.driver.over_limit_braking_share;
+
+        let mut simulation_state = SimulationState::new(&simulation_config);
+        let mut largest_offset: f64 = 0.0;
+        let mut hardest_over_limit_braking: f64 = 0.0;
+        let mut on_line_on_straight = true;
+        while simulation_state.lap_times.len() < 3 {
+            simulation_step(&mut simulation_state, &simulation_config);
+            let car = &simulation_state.car;
+            // Left turns: it runs wide to the right
+            largest_offset = largest_offset.min(car.line_offset);
+            if car.over_grip_limit {
+                assert!(car.acceleration < 0.0);
+                hardest_over_limit_braking = hardest_over_limit_braking.min(car.acceleration);
+            }
+            // End of each straight (points 70 and 192 of the oval)
+            if [70, 192].contains(&car.track_segment) {
+                on_line_on_straight &= car.line_offset.abs() < 0.01;
+            }
+        }
+        // About 1.1 m in the R 15 m corners: over the default margin of 0.5 m, so every lap is
+        // invalid
+        assert!(
+            largest_offset < -0.5 && largest_offset > -2.0,
+            "{}",
+            largest_offset
+        );
+        for lap in 0..3 {
+            assert!(simulation_state.is_lap_invalid(lap, simulation_config.driver.max_line_offset));
+        }
+        // Braking with the share of the grip: never as hard as full braking
+        assert!(
+            hardest_over_limit_braking < -1.0,
+            "{}",
+            hardest_over_limit_braking
+        );
+        assert!(braking_share == 0.3);
+        assert!(on_line_on_straight);
     }
 
     #[test]

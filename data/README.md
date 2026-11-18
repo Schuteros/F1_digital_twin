@@ -80,12 +80,14 @@ end_condition = { time_s = 30.0 }
 end_condition = { laps = 3, max_time_s = 600.0 }
 ```
 
-`[driver]` (docs/17, docs/18): optional. Without the table the driver plans exactly on the grip limit and uses the docs/17 plan as it is.
+`[driver]` (docs/17, docs/18, docs/20): optional. Without the table the driver plans exactly on the grip limit, uses the docs/17 plan as it is, may be 0.5 m from the line and brakes with 30 % of the grip over the limit.
 
 | Key | Unit | Meaning |
 |---|---|---|
 | `grip_margin` | | Optional, `0.0` when missing. Fraction of the tyre grip the driver leaves unused when planning corner speeds and braking points, 0.0 up to (not including) 1.0. `0.05` = plan with 5 % less grip, about 2.5 % less corner speed. `0.0` = on the limit. The simulated tyres keep their full grip, the difference is the reserve |
-| `braking_point_trials` | | Optional, `false` when missing. `true` = before the run, each braking point is moved earlier or later with trial runs of the full simulation until the car gets through the corner without going over the limit (docs/18). The moves are printed after the lap times |
+| `braking_point_trials` | | Optional, `false` when missing. `true` = before the run, each braking point is moved earlier or later with trial runs of the full simulation until the car gets through the corner without going over the limit (docs/18). The moves are printed after the lap times. A corner no braking point keeps on the line, or braking points that do not settle, give a warning and the run goes on (docs/20 section 20.8) |
+| `max_line_offset_m` | m | Optional, `0.5` when missing, > 0. Furthest the car may be from the line. A lap where it goes further is printed as invalid, the run goes on (docs/20 section 20.7) |
+| `over_limit_braking_share` | | Optional, `0.3` when missing, 0.0 to 1.0. Over the grip limit the driver brakes with this share of the grip and turns with the rest, sqrt(1 - share²) of the lateral grip (docs/20 section 20.6). `0.0` = turn only, `1.0` = brake only |
 
 `[initial_state]`: the starting conditions of the car at `start_time_s`.
 

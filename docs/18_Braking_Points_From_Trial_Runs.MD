@@ -96,6 +96,9 @@ A trial run of section $c$ with a shift $s_{shift,c}$:
 3. The trial **passes** if in no step the car was over the grip limit (`over_grip_limit`, docs/16)
    and it was never faster than the corner speed limit where it was.
 
+   Since docs/20 section 20.8 the trial checks the distance from the line instead: it passes if
+   the car never gets more than 0.01 m further from the line than at the start of the section.
+
 The trial runs use the **planning tyre** of docs/17 (both friction coefficients times
 $1 - \sigma$), not the real tyre. The braking points are then exact for a car that is $\sigma$
 worse than the real one, so the real car keeps the reserve everywhere: in the corner and in the
@@ -118,6 +121,8 @@ shift passes too. The latest braking point that passes is found by halving:
 
 About 10 to 15 trial runs per corner. If no shift up to the whole section length passes, the run
 stops with an error that names the corner: the car cannot get through it from that state at all.
+Since docs/20 section 20.8 this is a warning: the shift that got least far from the line is kept and
+the run goes on. The same for braking points that do not settle in 18.7.
 
 ---
 

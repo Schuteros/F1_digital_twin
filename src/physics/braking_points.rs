@@ -3,6 +3,8 @@
 //! Underlying science equations are found in this documentation:
 //! [Braking Points From Trial Runs Documentation](../../docs/18_Braking_Points_From_Trial_Runs.MD)
 
+use std::cell::Cell;
+
 use crate::physics::driver::{calculate_planning_tyre, calculate_target_speed_at};
 use crate::physics::simulation::{SimulationConfig, SimulationState, simulation_step};
 
@@ -16,9 +18,10 @@ const FIRST_SEARCH_STEP: f64 = 1.0;
 /// Most times around the lap before the braking points must have settled (docs/18 section 18.7)
 const MAX_CORRECTION_LAPS: u32 = 10;
 
-/// Speeds within this fraction above the corner speed limit count as on the limit. Only keeps
-/// rounding errors of a car that holds the limit from failing a trial.
-const SPEED_LIMIT_TOLERANCE: f64 = 1e-9;
+/// How much further from the line than at the start of the section a trial car may get in
+/// meters, m (epsilon_line, docs/20 section 20.8). A car held exactly on the grip limit runs
+/// wide by a centimetre or so, which is still on the line for the plan.
+const LINE_TOLERANCE: f64 = 0.01;
 
 /// Target speeds within this fraction below the corner speed limit count as on the limit when
 /// the corners are found
@@ -139,28 +142,44 @@ fn drive(
     }
 }
 
-/// Like `drive`, but gives false as soon as the car is over the grip limit or faster than the
-/// corner speed limit, or if it stops before getting there (docs/18 section 18.5).
+/// Result of one trial run (docs/20 section 20.8)
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TrialResult {
+    /// True if the car stayed within `LINE_TOLERANCE` of its starting distance from the line
+    /// and did not stop
+    passed: bool,
+    /// Largest distance from the line in the trial in meters, m
+    max_line_offset: f64,
+}
+
+/// Like `drive`, but checks how far the car gets from the line (docs/20 section 20.8). Stops
+/// early once the trial has failed: further off than the tolerance, or stopped.
 fn drive_and_check(
     simulation_state: &mut SimulationState,
     simulation_config: &SimulationConfig,
     distance: f64,
-) -> bool {
+) -> TrialResult {
     let end_distance = simulation_state.car.distance + distance;
+    let allowed_offset = simulation_state.car.line_offset.abs() + LINE_TOLERANCE;
+    let mut max_line_offset = simulation_state.car.line_offset.abs();
 
     while simulation_state.car.distance < end_distance {
         simulation_step(simulation_state, simulation_config);
         let car = &simulation_state.car;
+        max_line_offset = max_line_offset.max(car.line_offset.abs());
 
-        if car.over_grip_limit
-            || car.speed > car.corner_speed_limit * (1.0 + SPEED_LIMIT_TOLERANCE)
-            || car.speed <= 0.0
-        {
-            return false;
+        if max_line_offset > allowed_offset || car.speed <= 0.0 {
+            return TrialResult {
+                passed: false,
+                max_line_offset,
+            };
         }
     }
 
-    true
+    TrialResult {
+        passed: true,
+        max_line_offset,
+    }
 }
 
 /// One section of the lap: from the exit of the previous corner to the exit of this one
@@ -184,7 +203,7 @@ fn run_trial(
     saved_state: &SimulationState,
     section: Section,
     shift: f64,
-) -> bool {
+) -> TrialResult {
     let mut target_speeds = std::mem::take(&mut simulation_config.target_speeds);
     shift_braking_point(
         simulation_config,
@@ -202,19 +221,39 @@ fn run_trial(
     drive_and_check(&mut simulation_state, simulation_config, distance)
 }
 
+/// The braking point kept for one corner
+#[derive(Debug, Clone, PartialEq)]
+struct ShiftSearch {
+    /// Shift from the docs/17 plan in meters, m, positive = earlier
+    shift: f64,
+    /// Warning if no shift passed (docs/20 section 20.8)
+    warning: Option<String>,
+}
+
 /// Finds the latest braking point of one corner that passes a trial run, as a shift from the
 /// docs/17 plan in meters, m (docs/18 section 18.6). Leaves the section's target speeds set to
-/// that shift.
+/// that shift. If no shift up to the section length passes, keeps the one that got least far
+/// from the line and gives a warning (docs/20 section 20.8).
 fn find_braking_point_shift(
     simulation_config: &mut SimulationConfig,
     plan: &[f64],
     saved_state: &SimulationState,
     section: Section,
-) -> Result<f64, String> {
+) -> ShiftSearch {
     let section_length =
         calculate_section_length(simulation_config, section.start_point, section.end_point);
+    // Every failed trial, to fall back on the one that stayed closest to the line
+    let closest: Cell<Option<(f64, f64)>> = Cell::new(None);
     let trial = |config: &mut SimulationConfig, shift: f64| {
-        run_trial(config, plan, saved_state, section, shift)
+        let result = run_trial(config, plan, saved_state, section, shift);
+        if !result.passed
+            && closest
+                .get()
+                .is_none_or(|(_, offset)| result.max_line_offset < offset)
+        {
+            closest.set(Some((shift, result.max_line_offset)));
+        }
+        result.passed
     };
 
     // Steps 1 and 2: one shift that passes and one that fails
@@ -228,7 +267,10 @@ fn find_braking_point_shift(
                 // Even braking a whole section later passes: the car does not reach the
                 // braking curve from this state, so the plan stays as it is
                 trial(simulation_config, 0.0);
-                return Ok(0.0);
+                return ShiftSearch {
+                    shift: 0.0,
+                    warning: None,
+                };
             }
             if trial(simulation_config, -step) {
                 passing = -step;
@@ -243,11 +285,28 @@ fn find_braking_point_shift(
         let mut step = FIRST_SEARCH_STEP;
         loop {
             if step > section_length {
-                return Err(format!(
-                    "the car cannot get through the corner at {:.2} m without going over the \
-                     grip limit, even braking {:.0} m earlier (docs/18 section 18.6)",
-                    simulation_config.track.distances[section.apex_point], section_length
-                ));
+                // No braking point keeps the car on the line: keep the one that got least far
+                // from it, and say so (docs/20 section 20.8)
+                let (shift, max_line_offset) = closest.get().unwrap_or((0.0, 0.0));
+                trial(simulation_config, shift);
+                let apex_distance = simulation_config.track.distances[section.apex_point];
+                let mut warning = format!(
+                    "the car can not keep to the line through the corner at {:.2} m, even braking \
+                     {:.0} m earlier: kept the braking point {:+.2} m from the plan, which runs \
+                     wide by up to {:.3} m (docs/20 section 20.8)",
+                    apex_distance, section_length, shift, max_line_offset
+                );
+                if max_line_offset > simulation_config.driver.max_line_offset {
+                    warning.push_str(&format!(
+                        ". That is over max_line_offset_m = {} m, so laps through it will be \
+                         invalid",
+                        simulation_config.driver.max_line_offset
+                    ));
+                }
+                return ShiftSearch {
+                    shift,
+                    warning: Some(warning),
+                };
             }
             if trial(simulation_config, step) {
                 passing = step;
@@ -270,21 +329,25 @@ fn find_braking_point_shift(
 
     // Step 4: keep the passing shift, with the section's targets set to it
     trial(simulation_config, passing);
-    Ok(passing)
+    ShiftSearch {
+        shift: passing,
+        warning: None,
+    }
 }
 
 /// Corrects the braking points of the lap plan with trial runs of the full simulation (docs/18
 /// section 18.7) and gives them, one per corner in driving order from the start/finish line.
 /// `simulation_config` must be prepared up to the docs/17 target speeds and the initial car
 /// state. On return its target speeds include the corrected braking points, and everything else
-/// is unchanged.
+/// is unchanged. Also gives the warnings of docs/20 section 20.8: corners where no braking
+/// point keeps the car on the line, and braking points that did not settle.
 pub(crate) fn correct_braking_points(
     simulation_config: &mut SimulationConfig,
-) -> Result<Vec<BrakingPoint>, String> {
+) -> (Vec<BrakingPoint>, Vec<String>) {
     let plan = simulation_config.target_speeds.clone();
     let corners = find_corners(&plan, &simulation_config.corner_speed_limits);
     if corners.is_empty() {
-        return Ok(Vec::new());
+        return (Vec::new(), Vec::new());
     }
 
     // The trial car has the planning tyre (docs/18 section 18.5)
@@ -294,15 +357,16 @@ pub(crate) fn correct_braking_points(
     let result = correct_braking_points_with_trials(simulation_config, &plan, &corners);
     simulation_config.car.tyre = real_tyre;
 
-    let shifts = result?;
-    Ok(corners
+    let (shifts, warnings) = result;
+    let braking_points = corners
         .iter()
         .zip(shifts)
         .map(|(corner, shift)| BrakingPoint {
             apex_distance: simulation_config.track.distances[corner.apex_point],
             shift,
         })
-        .collect())
+        .collect();
+    (braking_points, warnings)
 }
 
 /// The laps of docs/18 section 18.7 with the trial tyre already in `simulation_config`
@@ -310,7 +374,7 @@ fn correct_braking_points_with_trials(
     simulation_config: &mut SimulationConfig,
     plan: &[f64],
     corners: &[Corner],
-) -> Result<Vec<f64>, String> {
+) -> (Vec<f64>, Vec<String>) {
     let track = &simulation_config.track;
     let corner_count = corners.len();
 
@@ -332,6 +396,10 @@ fn correct_braking_points_with_trials(
 
     // Steps 2 to 4: correct the sections in driving order, lap after lap
     let mut shifts = vec![0.0; corner_count];
+    // The warnings of the last time around the lap, one per corner at most
+    let mut corner_warnings: Vec<Option<String>> = vec![None; corner_count];
+    let collect_warnings =
+        |corner_warnings: Vec<Option<String>>| corner_warnings.into_iter().flatten().collect();
     for lap in 0..MAX_CORRECTION_LAPS {
         let mut largest_change: f64 = 0.0;
 
@@ -343,8 +411,10 @@ fn correct_braking_points_with_trials(
                 end_point: corners[corner].exit_point,
             };
 
-            let shift =
-                find_braking_point_shift(simulation_config, plan, &simulation_state, section)?;
+            let search =
+                find_braking_point_shift(simulation_config, plan, &simulation_state, section);
+            let shift = search.shift;
+            corner_warnings[corner] = search.warning;
             largest_change = largest_change.max((shift - shifts[corner]).abs());
             shifts[corner] = shift;
 
@@ -357,14 +427,18 @@ fn correct_braking_points_with_trials(
         // The first lap started from the start state, not from a lap before, so it is never
         // the last one
         if lap > 0 && largest_change <= SHIFT_RESOLUTION {
-            return Ok(shifts);
+            return (shifts, collect_warnings(corner_warnings));
         }
     }
 
-    Err(format!(
-        "the braking points did not settle in {} laps (docs/18 section 18.7)",
+    // Not settled: keep the last lap's braking points and say so (docs/20 section 20.8)
+    let mut warnings: Vec<String> = collect_warnings(corner_warnings);
+    warnings.push(format!(
+        "the braking points did not settle in {} laps: kept those of the last lap (docs/18 \
+         section 18.7)",
         MAX_CORRECTION_LAPS
-    ))
+    ));
+    (shifts, warnings)
 }
 
 #[cfg(test)]
@@ -382,6 +456,7 @@ mod tests {
             driver: Driver {
                 grip_margin,
                 braking_point_trials,
+                ..Default::default()
             },
             initial_car_state: CarState {
                 distance: 0.0,
@@ -397,17 +472,20 @@ mod tests {
         simulation_config
     }
 
-    /// Drives the whole run and counts the steps over the grip limit
-    fn count_steps_over_grip_limit(simulation_config: &SimulationConfig) -> (usize, Vec<f64>) {
+    /// Runs 3 laps and gives the number of steps over the grip limit, the lap times and the
+    /// largest distance from the line in meters, m
+    fn count_steps_over_grip_limit(simulation_config: &SimulationConfig) -> (usize, Vec<f64>, f64) {
         let mut simulation_state = SimulationState::new(simulation_config);
         let mut steps = 0;
+        let mut max_line_offset: f64 = 0.0;
         while simulation_state.lap_times.len() < 3 {
             simulation_step(&mut simulation_state, simulation_config);
             if simulation_state.car.over_grip_limit {
                 steps += 1;
             }
+            max_line_offset = max_line_offset.max(simulation_state.car.line_offset.abs());
         }
-        (steps, simulation_state.lap_times)
+        (steps, simulation_state.lap_times, max_line_offset)
     }
 
     #[test]
@@ -503,24 +581,25 @@ mod tests {
     }
 
     #[test]
-    fn test_trials_keep_the_car_under_the_grip_limit() {
+    fn test_trials_keep_the_car_on_the_line() {
         // docs/17 without a margin goes over the limit at every corner entry (docs/17
-        // section 17.8). With the braking points from trial runs it never does (docs/18
-        // section 18.10)
-        let (steps_without, _) = count_steps_over_grip_limit(&oval_config(0.0, false));
-        assert!(steps_without > 100, "{}", steps_without);
+        // section 17.8). With the braking points from trial runs the car stays within 1 cm of
+        // the line (docs/20 section 20.8)
+        let (steps_without, _, _) = count_steps_over_grip_limit(&oval_config(0.0, false));
+        assert!(steps_without > 0, "{}", steps_without);
 
         let simulation_config = oval_config(0.0, true);
+        assert!(simulation_config.braking_point_warnings.is_empty());
         let braking_points = &simulation_config.braking_points;
         assert_eq!(braking_points.len(), 2);
         // Both corners of the oval are the same, so are their braking points
         let shift = braking_points[0].shift;
         assert!((braking_points[1].shift - shift).abs() <= 2.0 * SHIFT_RESOLUTION);
-        // The car needs to brake a little earlier than the quasi-static plan, but not much
-        assert!(shift > 0.0 && shift < 5.0, "{}", shift);
+        // Close to the quasi-static plan
+        assert!(shift.abs() < 5.0, "{}", shift);
 
-        let (steps_with, lap_times) = count_steps_over_grip_limit(&simulation_config);
-        assert_eq!(steps_with, 0);
+        let (_, lap_times, max_line_offset) = count_steps_over_grip_limit(&simulation_config);
+        assert!(max_line_offset < LINE_TOLERANCE, "{}", max_line_offset);
         assert!(
             (lap_times[2] - lap_times[1]).abs() < 1e-3,
             "{:?}",
@@ -529,8 +608,9 @@ mod tests {
     }
 
     #[test]
-    fn test_braking_later_than_found_goes_over_the_limit() {
-        // The search finds the boundary: braking 3 cm later than found is too late
+    fn test_braking_later_than_found_runs_wide() {
+        // The search finds the boundary: braking 3 cm later than found is too late, the car
+        // gets further than 1 cm from the line
         let mut simulation_config = oval_config(0.0, true);
         let plan = oval_config(0.0, false).target_speeds;
         let corners = find_corners(&plan, &simulation_config.corner_speed_limits);
@@ -549,8 +629,8 @@ mod tests {
             simulation_config.target_speeds = targets;
         }
 
-        let (steps, _) = count_steps_over_grip_limit(&simulation_config);
-        assert!(steps > 0);
+        let (_, _, max_line_offset) = count_steps_over_grip_limit(&simulation_config);
+        assert!(max_line_offset > LINE_TOLERANCE, "{}", max_line_offset);
     }
 
     #[test]
@@ -560,13 +640,128 @@ mod tests {
         let without = oval_config(0.0, true);
         let with_margin = oval_config(0.05, true);
         let shift = with_margin.braking_points[0].shift;
-        assert!(shift > 0.0, "{}", shift);
-        assert!((shift - without.braking_points[0].shift).abs() < 0.5);
+        assert!(
+            (shift - without.braking_points[0].shift).abs() < 0.5,
+            "{}",
+            shift
+        );
 
-        let (steps, lap_times) = count_steps_over_grip_limit(&with_margin);
+        let (steps, _, max_line_offset) = count_steps_over_grip_limit(&with_margin);
         assert_eq!(steps, 0);
-        // Slower than docs/17 with the same margin, which brakes later
-        let (_, plan_lap_times) = count_steps_over_grip_limit(&oval_config(0.05, false));
-        assert!(lap_times[2] > plan_lap_times[2]);
+        assert!(max_line_offset < 1e-6, "{}", max_line_offset);
+    }
+
+    /// Closed test track with an R 7 m chicane on each long straight (left 40 degrees, right 80,
+    /// left 40, all R 7 m) and four 90 degree left turns of R 4.5 m and R 9 m, points 0.5 m
+    /// apart, 251.5 m long. Built by driving it: straights and arcs one after the other.
+    fn chicane_test_track() -> Track {
+        use std::f64::consts::FRAC_PI_2;
+        let chicane = 40f64.to_radians();
+        // (length of a straight, 0) or (radius, turn angle, positive = left)
+        let half: [(f64, f64); 8] = [
+            (30.0, 0.0),
+            (7.0, -chicane),
+            (7.0, 2.0 * chicane),
+            (7.0, -chicane),
+            (30.0, 0.0),
+            (4.5, FRAC_PI_2),
+            (25.0, 0.0),
+            (9.0, FRAC_PI_2),
+        ];
+        let step: f64 = 0.5;
+        let (mut x, mut y, mut heading) = (0.0f64, 0.0f64, 0.0f64);
+        let mut points = vec![(0.0, 0.0)];
+        for &(size, angle) in half.iter().chain(half.iter()) {
+            if angle == 0.0 {
+                for _ in 0..(size / step).round() as usize {
+                    x += step * heading.cos();
+                    y += step * heading.sin();
+                    points.push((x, y));
+                }
+            } else {
+                let count = ((size * angle.abs() / step).round() as usize).max(2);
+                let turn = angle / count as f64;
+                let chord = 2.0 * size * (turn.abs() / 2.0).sin();
+                for _ in 0..count {
+                    x += chord * (heading + turn / 2.0).cos();
+                    y += chord * (heading + turn / 2.0).sin();
+                    heading += turn;
+                    points.push((x, y));
+                }
+            }
+        }
+        // The last point is back at the first
+        points.pop();
+        Track::from_points(points, 0.0).unwrap()
+    }
+
+    #[test]
+    fn test_chicane_runs_without_error() {
+        // The R 7 m chicane stopped docs/18 with an error, even with a 10 % margin: the car
+        // held exactly on the limit flickers over it by a fraction of a percent. Now it runs a
+        // few centimetres from the line at most, all laps valid (docs/20 section 20.8). With the
+        // margin the braking points keep moving by a few tenths of a metre from lap to lap, so
+        // the trials end with the "did not settle" warning, but every corner is kept on the line.
+        for grip_margin in [0.0, 0.1] {
+            let mut simulation_config = SimulationConfig {
+                track: chicane_test_track(),
+                driver: Driver {
+                    grip_margin,
+                    braking_point_trials: true,
+                    ..Default::default()
+                },
+                initial_car_state: CarState {
+                    distance: 0.0,
+                    ..CarState::default()
+                },
+                end_condition: EndCondition::Laps {
+                    laps: 3,
+                    max_time: 200.0,
+                },
+                ..SimulationConfig::default()
+            };
+            simulation_config.prepare().unwrap();
+            let warnings = &simulation_config.braking_point_warnings;
+            if grip_margin == 0.0 {
+                assert!(warnings.is_empty(), "{:?}", warnings);
+            }
+            assert!(
+                warnings
+                    .iter()
+                    .all(|warning| warning.contains("did not settle")),
+                "{:?}",
+                warnings
+            );
+
+            let (_, lap_times, max_line_offset) = count_steps_over_grip_limit(&simulation_config);
+            assert_eq!(lap_times.len(), 3);
+            assert!(max_line_offset < 0.1, "{}", max_line_offset);
+        }
+    }
+
+    #[test]
+    fn test_impossible_corner_gives_a_warning() {
+        // The plan is made with the real tyre, then the trials get a tyre with half the
+        // lateral grip: no braking point keeps the car on the line. The trials still finish,
+        // with a warning per corner instead of an error, and with a max offset of 1 micrometre
+        // the warning says the laps will be invalid.
+        let mut simulation_config = oval_config(0.0, false);
+        simulation_config.driver.braking_point_trials = true;
+        simulation_config.driver.max_line_offset = 1e-6;
+        simulation_config.prepare().unwrap();
+        let plan = simulation_config.target_speeds.clone();
+        simulation_config.car.tyre.mu_y_ref *= 0.5;
+        let (braking_points, warnings) = {
+            simulation_config.target_speeds = plan;
+            correct_braking_points(&mut simulation_config)
+        };
+        assert_eq!(braking_points.len(), 2);
+        assert!(!warnings.is_empty());
+        assert!(
+            warnings[0].contains("can not keep to the line"),
+            "{}",
+            warnings[0]
+        );
+        assert!(warnings[0].contains("invalid"), "{}", warnings[0]);
     }
 }

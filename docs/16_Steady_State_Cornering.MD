@@ -294,7 +294,9 @@ car has room to brake.
 
 **Over the grip limit.** A step is marked `over_grip_limit` in the log when a tyre needs more than
 0.01 % above its lateral limit $F_{y,max}$ at its current load. In reality the car would then run
-wide (docs/18). Until then the car stays on the line. It happens in two ways:
+wide. Since docs/20 it does: the car gets the lateral force the tyres can make and leaves the line,
+and over the limit the driver brakes with a share of the grip instead of the straight-line braking
+below. It happens in two ways:
 
 * **Too fast for the corner** ($v > v_{limit}$). Without braking points the car can arrive at a
   corner much too fast. The driver then uses the whole grip for braking in a straight line

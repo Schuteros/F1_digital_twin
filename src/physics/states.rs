@@ -73,20 +73,32 @@ pub struct CarState {
     /// distance, the speed and the plan, not in the run file.
     #[serde(skip, default = "no_corner_speed_limit")]
     pub target_speed: f64,
-    /// Lateral acceleration the line needs at the current speed in meters per second squared,
-    /// m/s^2, positive to the left, so positive in a left turn (docs/16, equation 16.1, docs/19
-    /// section 19.1). Output only, calculated from the speed and the curvature, not in the run
-    /// file.
+    /// Lateral acceleration the tyres give the car in meters per second squared, m/s^2,
+    /// positive to the left, so positive in a left turn (docs/16, equation 16.1, docs/19 section
+    /// 19.1). On the line it is what the line needs, over the grip limit it is less and the car
+    /// runs wide (docs/20 section 20.5). Output only, not in the run file.
     #[serde(skip)]
     pub lateral_acceleration: f64,
-    /// True if a tyre needs more lateral force than it can make, so in reality the car would
-    /// run wide (docs/16 section 16.7). Output only, not in the run file.
+    /// True if the tyres can not make the lateral force the driver asks for, so the car runs
+    /// wide (docs/16 section 16.7, docs/20 section 20.5). Output only, not in the run file.
     #[serde(skip)]
     pub over_grip_limit: bool,
     /// Tyre load of each corner in Newtons, N (docs/19, equation 19.15). Output only, not in
     /// the run file.
     #[serde(skip)]
     pub(crate) tyre_loads: CornerLoads,
+    /// Offset from the line in meters, m, positive = left of the line (n, docs/20 section
+    /// 20.3). The run starts on the line, not in the run file.
+    #[serde(skip)]
+    pub line_offset: f64,
+    /// Angle between the car's direction of travel and the line in rad, positive = pointing
+    /// left of the line (psi_e, docs/20 section 20.3). Not in the run file.
+    #[serde(skip)]
+    pub heading_error: f64,
+    /// True while the car is further from the line than the driver's max_line_offset_m
+    /// (docs/20 section 20.7). Output only, not in the run file.
+    #[serde(skip)]
+    pub outside_margin: bool,
 }
 
 /// Corner speed limit and target speed of a car state read from a run file, before `prepare`
@@ -117,6 +129,9 @@ impl Default for CarState {
             lateral_acceleration: 0.0,
             over_grip_limit: false,
             tyre_loads: CornerLoads::default(),
+            line_offset: 0.0,
+            heading_error: 0.0,
+            outside_margin: false,
         }
     }
 }
