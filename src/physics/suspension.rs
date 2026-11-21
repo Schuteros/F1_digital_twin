@@ -1,4 +1,5 @@
-//! Suspension model: body heave, pitch and roll on four spring-damper corners (docs/11, docs/19)
+//! Suspension model: body heave, pitch and roll on four spring-damper corners (docs/11, docs/19),
+//! with optional heave and roll elements per axle (docs/21)
 //!
 //! All motion is measured from the static equilibrium (docs/11 section 11.2), so the state
 //! starts at zero and the static loads never enter the body equations.
@@ -61,6 +62,12 @@ pub struct Suspension {
     /// per radian, N·m/rad (docs/19 section 19.4). Optional, 0 (no bar) when missing.
     #[serde(rename = "rear_anti_roll_bar_stiffness_N_m_per_rad", default)]
     pub rear_anti_roll_bar_stiffness: f64,
+    /// Heave and roll elements of the front axle (docs/21). Optional, all 0 (none) when missing.
+    #[serde(default)]
+    pub front_axle: AxleSuspension,
+    /// Heave and roll elements of the rear axle (docs/21). Optional, all 0 (none) when missing.
+    #[serde(default)]
+    pub rear_axle: AxleSuspension,
 }
 
 impl Default for Suspension {
@@ -79,8 +86,33 @@ impl Default for Suspension {
             rear_roll_centre_height: 0.0,
             front_anti_roll_bar_stiffness: 0.0,
             rear_anti_roll_bar_stiffness: 0.0,
+            front_axle: AxleSuspension::default(),
+            rear_axle: AxleSuspension::default(),
         }
     }
+}
+
+/// Heave element and roll element of one axle, all measured at the wheel (docs/21). They add to
+/// the corner springs and dampers. A fully decoupled axle has corner spring rates and damping 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AxleSuspension {
+    /// Heave element stiffness (k_heave): force on the whole axle per meter of heave of the
+    /// axle, in Newtons per meter, N/m. Optional, 0 when missing.
+    #[serde(rename = "heave_stiffness_N_per_m", default)]
+    pub heave_stiffness: f64,
+    /// Heave element damping (c_heave) for the whole axle in Newton seconds per meter, N·s/m.
+    /// Optional, 0 when missing.
+    #[serde(rename = "heave_damping_N_s_per_m", default)]
+    pub heave_damping: f64,
+    /// Roll element stiffness (K_roll) in Newton meters per radian, N·m/rad. Optional, 0 when
+    /// missing.
+    #[serde(rename = "roll_stiffness_N_m_per_rad", default)]
+    pub roll_stiffness: f64,
+    /// Roll element damping (C_roll) in Newton meter seconds per radian, N·m·s/rad. Optional,
+    /// 0 when missing.
+    #[serde(rename = "roll_damping_N_m_s_per_rad", default)]
+    pub roll_damping: f64,
 }
 
 /// Spring, damper and end stops of one suspension corner, all measured at the wheel
@@ -420,7 +452,8 @@ pub(crate) fn calculate_rear_compression_speed(
 }
 
 /// Calculates the clamped force of every corner from the corner travel, with the anti-roll bar
-/// force (docs/11, equations 11.7 to 11.10, docs/19, equations 19.10 and 19.11)
+/// force and the heave and roll element forces (docs/11, equations 11.7 to 11.10, docs/19,
+/// equations 19.10 and 19.11, docs/21, equations 21.2 to 21.4)
 pub(crate) fn calculate_corner_forces(
     suspension: &Suspension,
     travel: &CornerTravel,
@@ -440,33 +473,87 @@ pub(crate) fn calculate_corner_forces(
         travel.rear_right.compression,
         roll.rear_track_width,
     );
+    // (21.2): the same on both wheels of the axle
+    let front_heave = calculate_heave_element_force(
+        &suspension.front_axle,
+        &travel.front_left,
+        &travel.front_right,
+    );
+    let rear_heave =
+        calculate_heave_element_force(&suspension.rear_axle, &travel.rear_left, &travel.rear_right);
+    // (21.3): added to the right corner, subtracted from the left one, like the bar
+    let front_roll = calculate_roll_element_force(
+        &suspension.front_axle,
+        &travel.front_left,
+        &travel.front_right,
+        roll.front_track_width,
+    );
+    let rear_roll = calculate_roll_element_force(
+        &suspension.rear_axle,
+        &travel.rear_left,
+        &travel.rear_right,
+        roll.rear_track_width,
+    );
 
     CornerForces {
         front_left: calculate_corner_force(
             &suspension.front_left,
             &travel.front_left,
             -front_bar,
+            front_heave - front_roll,
             static_loads.front_left,
         ),
         front_right: calculate_corner_force(
             &suspension.front_right,
             &travel.front_right,
             front_bar,
+            front_heave + front_roll,
             static_loads.front_right,
         ),
         rear_left: calculate_corner_force(
             &suspension.rear_left,
             &travel.rear_left,
             -rear_bar,
+            rear_heave - rear_roll,
             static_loads.rear_left,
         ),
         rear_right: calculate_corner_force(
             &suspension.rear_right,
             &travel.rear_right,
             rear_bar,
+            rear_heave + rear_roll,
             static_loads.rear_right,
         ),
     }
+}
+
+/// Calculates the heave element force at each wheel of an axle in Newtons, N, positive = pushing
+/// the body up: half of the element's force on the axle, from the average travel and speed of the
+/// two wheels (docs/21, equation 21.2). Zero in pure roll.
+pub(crate) fn calculate_heave_element_force(
+    axle: &AxleSuspension,
+    left: &WheelTravel,
+    right: &WheelTravel,
+) -> f64 {
+    let heave = 0.5 * (left.compression + right.compression);
+    let heave_speed = 0.5 * (left.compression_speed + right.compression_speed);
+
+    0.5 * (axle.heave_stiffness * heave + axle.heave_damping * heave_speed)
+}
+
+/// Calculates the roll element force at each wheel of an axle in Newtons, N: positive pushes the
+/// right corner up and the left one down (docs/21, equation 21.3). Zero in heave and pitch.
+///
+/// * `track_width` - track width of the axle (b) in meters, m
+pub(crate) fn calculate_roll_element_force(
+    axle: &AxleSuspension,
+    left: &WheelTravel,
+    right: &WheelTravel,
+    track_width: f64,
+) -> f64 {
+    (axle.roll_stiffness * (right.compression - left.compression)
+        + axle.roll_damping * (right.compression_speed - left.compression_speed))
+        / (track_width * track_width)
 }
 
 /// Calculates the corner force on top of the static load in Newtons, N, with the wheel lift
@@ -475,6 +562,8 @@ pub(crate) fn calculate_corner_forces(
 /// * `travel` - compression and compression speed of this corner
 /// * `anti_roll_bar_force` - force of the axle's anti-roll bar on this corner in Newtons, N,
 ///   positive = pushing the body up (docs/19, equation 19.10)
+/// * `axle_element_force` - force of the axle's heave and roll elements on this corner in
+///   Newtons, N, positive = pushing the body up (docs/21, equation 21.4)
 /// * `static_corner_load` - static tyre load of this corner in Newtons, N
 ///
 /// A tyre can't pull on the road, so the force never goes below `-static_corner_load`
@@ -483,13 +572,15 @@ pub(crate) fn calculate_corner_force(
     corner: &CornerSuspension,
     travel: &WheelTravel,
     anti_roll_bar_force: f64,
+    axle_element_force: f64,
     static_corner_load: f64,
 ) -> f64 {
     let compression = travel.compression;
     let force = corner.spring_rate * compression
         + corner.damping * travel.compression_speed
         + calculate_end_stop_force(corner, compression)
-        + anti_roll_bar_force;
+        + anti_roll_bar_force
+        + axle_element_force;
 
     if force < -static_corner_load {
         -static_corner_load
@@ -934,21 +1025,24 @@ mod tests {
         let static_corner_load = 2000.0; // Newtons (N)
 
         // Spring + damper: 130 000 N/m * 0.01 m + 5000 N·s/m * 0.1 m/s = 1300 N + 500 N = 1800 N
-        let force = calculate_corner_force(&corner, &wheel(0.01, 0.1), 0.0, static_corner_load);
+        let force =
+            calculate_corner_force(&corner, &wheel(0.01, 0.1), 0.0, 0.0, static_corner_load);
         assert!((force - 1800.0).abs() < 1e-9);
 
         // Spring + bump stop: 130 000 * 0.02 + 1 000 000 * (0.02 - 0.015) = 2600 N + 5000 N = 7600 N
-        let force = calculate_corner_force(&corner, &wheel(0.02, 0.0), 0.0, static_corner_load);
+        let force =
+            calculate_corner_force(&corner, &wheel(0.02, 0.0), 0.0, 0.0, static_corner_load);
         assert!((force - 7600.0).abs() < 1e-9);
 
         // Wheel lift: 130 000 * (-0.02) + 5000 * (-0.1) = -2600 N - 500 N = -3100 N < -2000 N
         // -> clamped to -2000 N, tyre load 0 N
-        let force = calculate_corner_force(&corner, &wheel(-0.02, -0.1), 0.0, static_corner_load);
+        let force =
+            calculate_corner_force(&corner, &wheel(-0.02, -0.1), 0.0, 0.0, static_corner_load);
         assert_eq!(force, -2000.0);
 
         // NaN is not hidden by the clamp
         assert!(
-            calculate_corner_force(&corner, &wheel(f64::NAN, 0.0), 0.0, static_corner_load)
+            calculate_corner_force(&corner, &wheel(f64::NAN, 0.0), 0.0, 0.0, static_corner_load)
                 .is_nan()
         );
     }

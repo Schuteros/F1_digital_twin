@@ -183,7 +183,7 @@ calculated from the torque curve, gearing and wheel radius before the simulation
 | `type` | | `"rear_wheel_drive"`, `"front_wheel_drive"` or `"all_wheel_drive"` |
 | `front_torque_split` | | Only with `"all_wheel_drive"`, and required there. Fraction of the drive force on the front axle, 0..=1 |
 
-`[suspension]` (docs/11, docs/19)
+`[suspension]` (docs/11, docs/19, docs/21)
 
 | Key | Unit | Meaning |
 |---|---|---|
@@ -201,12 +201,26 @@ calculated from the torque curve, gearing and wheel radius before the simulation
 
 | Key | Unit | Meaning |
 |---|---|---|
-| `spring_rate_N_per_m` | N/m | Wheel rate (motion ratio included), > 0 |
+| `spring_rate_N_per_m` | N/m | Wheel rate (motion ratio included), >= 0. 0 for a decoupled axle, which then needs a heave element (docs/21) |
 | `damping_N_s_per_m` | N·s/m | Damping coefficient, >= 0 |
 | `bump_gap_m` | m | Compression from static before the bump stop touches, >= 0 |
 | `bump_rate_N_per_m` | N/m | Bump stop stiffness, >= 0 |
 | `droop_gap_m` | m | Extension from static before the droop limiter engages, >= 0 |
 | `droop_rate_N_per_m` | N/m | Droop stop stiffness, >= 0 |
+
+`[suspension.front_axle]`, `[suspension.rear_axle]` (docs/21): optional. Heave and roll elements of the
+axle, measured at the wheel. They add to the corner springs and dampers. Every key is optional, 0 when
+missing, and >= 0. Each axle needs a heave rate > 0 (corner springs + heave element) and the car a roll
+stiffness > 0. Converting from the shock: `k_heave = k_shock * MR_h²` with `MR_h` the total shock travel
+per meter of heave, `K_roll = k_shock * MR_phi²` with `MR_phi` the shock travel per radian of roll (docs/21
+section 21.5).
+
+| Key | Unit | Meaning |
+|---|---|---|
+| `heave_stiffness_N_per_m` | N/m | Heave element: force on the whole axle per meter of heave, both wheels together |
+| `heave_damping_N_s_per_m` | N·s/m | Heave element damping for the whole axle |
+| `roll_stiffness_N_m_per_rad` | N·m/rad | Roll element: roll moment per radian of roll. Does the same as an anti-roll bar |
+| `roll_damping_N_m_s_per_rad` | N·m·s/rad | Roll element damping |
 
 `[frame]` (docs/19 section 19.8): optional. Without it the frame is rigid and the body rolls as one piece.
 With it the front and rear halves of the body roll separately, joined by a torsion spring.

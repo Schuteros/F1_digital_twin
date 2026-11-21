@@ -298,6 +298,7 @@ mod tests {
     use super::*;
     use crate::physics::powertrain::Drivetrain;
     use crate::physics::simulation::start_simulation;
+    use crate::physics::suspension::AxleSuspension;
 
     /// The repo's data folder, found from the manifest so tests don't depend on the working directory
     fn data_folder() -> PathBuf {
@@ -813,6 +814,39 @@ mod tests {
         assert_eq!(config.car.suspension.front_roll_centre_height, 0.0);
         assert_eq!(config.car.suspension.front_anti_roll_bar_stiffness, 0.0);
         assert_eq!(config.initial_car_state.suspension.roll_front, 0.0);
+
+        // Heave and roll elements (docs/21): optional tables, missing keys are 0
+        let data = TempData::new("axle_elements");
+        data.replace(
+            "cars/baseline.toml",
+            "rear_anti_roll_bar_stiffness_N_m_per_rad = 0.0",
+            "rear_anti_roll_bar_stiffness_N_m_per_rad = 0.0\n\n\
+             [suspension.front_axle]\n\
+             heave_stiffness_N_per_m = 260000.0\n\
+             roll_damping_N_m_s_per_rad = 4800.0\n",
+        );
+        let config = load_run(&data.run()).unwrap();
+        let front_axle = config.car.suspension.front_axle;
+        assert_eq!(front_axle.heave_stiffness, 260_000.0);
+        assert_eq!(front_axle.heave_damping, 0.0);
+        assert_eq!(front_axle.roll_stiffness, 0.0);
+        assert_eq!(front_axle.roll_damping, 4_800.0);
+        assert_eq!(config.car.suspension.rear_axle, AxleSuspension::default());
+
+        let data = TempData::new("axle_elements_unknown_key");
+        data.replace(
+            "cars/baseline.toml",
+            "rear_anti_roll_bar_stiffness_N_m_per_rad = 0.0",
+            "rear_anti_roll_bar_stiffness_N_m_per_rad = 0.0\n\n\
+             [suspension.rear_axle]\n\
+             roll_rate_N_m_per_rad = 1.0\n",
+        );
+        let message = load_run(&data.run()).unwrap_err();
+        assert!(
+            message.contains("unknown field `roll_rate_N_m_per_rad`"),
+            "{}",
+            message
+        );
 
         // The track widths are required
         let data = TempData::new("missing_track_width");

@@ -2,7 +2,7 @@ use crate::physics::aero::{AeroLoads, calculate_aero_loads};
 use crate::physics::braking_points::{BrakingPoint, correct_braking_points};
 use crate::physics::car::Car;
 use crate::physics::car_state_log::CarStateLog;
-use crate::physics::chassis::calculate_axle_distances;
+use crate::physics::chassis::{ChassisGeometry, calculate_axle_distances};
 use crate::physics::cornering::{
     AxleLateralForces, OVER_GRIP_LIMIT_MARGIN, calculate_axle_lateral_forces,
     calculate_corner_speed_limits, calculate_lateral_acceleration, calculate_wanted_acceleration,
@@ -33,10 +33,10 @@ use crate::physics::roll::{
 };
 use crate::physics::states::CarState;
 use crate::physics::suspension::{
-    CornerForces, CornerLoads, CornerSuspension, StaticCarValues, calculate_body_accelerations,
-    calculate_corner_forces_from_state, calculate_corner_tyre_loads, calculate_natural_frequencies,
-    calculate_static_car_values, sum_axle_loads, update_suspension_positions,
-    update_suspension_velocities,
+    CornerForces, CornerLoads, CornerSuspension, StaticCarValues, Suspension,
+    calculate_body_accelerations, calculate_corner_forces_from_state, calculate_corner_tyre_loads,
+    calculate_natural_frequencies, calculate_static_car_values, sum_axle_loads,
+    update_suspension_positions, update_suspension_velocities,
 };
 use crate::physics::track::{
     Track, calculate_crossing_time, find_active_braking_zone, find_track_position, is_braking_zone,
@@ -996,17 +996,20 @@ impl SimulationConfig {
         validate_roll(self)?;
 
         // Time step stability (docs/11 section 11.8) with the uncoupled frequencies (11.17),
-        // using the stiffest rate of each corner (spring + end stop), and the faster roll
-        // frequency (docs/19 section 19.10)
+        // using the stiffest rate of each corner (spring + end stop) plus the heave elements,
+        // and the faster roll frequency (docs/19 section 19.10) with the roll elements (docs/21
+        // section 21.4)
         let distances = calculate_axle_distances(mass, &self.car.geometry);
         let frequencies = calculate_natural_frequencies(
             mass.total,
             suspension.pitch_inertia,
             &distances,
             calculate_stiffest_corner_rate(&suspension.front_left)
-                + calculate_stiffest_corner_rate(&suspension.front_right),
+                + calculate_stiffest_corner_rate(&suspension.front_right)
+                + suspension.front_axle.heave_stiffness,
             calculate_stiffest_corner_rate(&suspension.rear_left)
-                + calculate_stiffest_corner_rate(&suspension.rear_right),
+                + calculate_stiffest_corner_rate(&suspension.rear_right)
+                + suspension.rear_axle.heave_stiffness,
         );
         let roll = calculate_roll_values(&self.car, &distances);
         let stiffest_roll = RollStiffnesses {
@@ -1015,13 +1018,13 @@ impl SimulationConfig {
                 calculate_stiffest_corner_rate(&suspension.front_right),
                 roll.front_track_width,
                 suspension.front_anti_roll_bar_stiffness,
-            ),
+            ) + suspension.front_axle.roll_stiffness,
             rear: calculate_axle_roll_stiffness(
                 calculate_stiffest_corner_rate(&suspension.rear_left),
                 calculate_stiffest_corner_rate(&suspension.rear_right),
                 roll.rear_track_width,
                 suspension.rear_anti_roll_bar_stiffness,
-            ),
+            ) + suspension.rear_axle.roll_stiffness,
         };
         let frequency_max = frequencies
             .heave
@@ -1183,6 +1186,8 @@ fn validate_roll(simulation_config: &SimulationConfig) -> Result<(), String> {
         }
     }
 
+    validate_axle_elements(suspension, &car.geometry)?;
+
     if let Some(frame) = &car.frame
         && (!frame.torsional_stiffness.is_finite() || frame.torsional_stiffness <= 0.0)
     {
@@ -1245,10 +1250,83 @@ fn validate_tyre(tyre: &Tyre) -> Result<(), String> {
     Ok(())
 }
 
+/// Checks the heave and roll elements of both axles, and that each axle still has a heave rate
+/// and the car a roll stiffness when corner springs are 0 (docs/21 section 21.8)
+fn validate_axle_elements(
+    suspension: &Suspension,
+    geometry: &ChassisGeometry,
+) -> Result<(), String> {
+    for (name, axle) in [
+        ("front_axle", &suspension.front_axle),
+        ("rear_axle", &suspension.rear_axle),
+    ] {
+        for (field, value, unit) in [
+            ("heave_stiffness", axle.heave_stiffness, "N/m"),
+            ("heave_damping", axle.heave_damping, "N·s/m"),
+            ("roll_stiffness", axle.roll_stiffness, "N·m/rad"),
+            ("roll_damping", axle.roll_damping, "N·m·s/rad"),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "suspension.{}.{} must be >= 0 {}, got {}",
+                    name, field, unit, value
+                ));
+            }
+        }
+    }
+
+    // (21.5): corner springs + heave element
+    for (name, left, right, axle) in [
+        (
+            "front",
+            &suspension.front_left,
+            &suspension.front_right,
+            &suspension.front_axle,
+        ),
+        (
+            "rear",
+            &suspension.rear_left,
+            &suspension.rear_right,
+            &suspension.rear_axle,
+        ),
+    ] {
+        let heave_rate = left.spring_rate + right.spring_rate + axle.heave_stiffness;
+        if heave_rate <= 0.0 {
+            return Err(format!(
+                "the {} axle needs a heave rate > 0 N/m: corner spring rates and \
+                 suspension.{}_axle.heave_stiffness are all 0",
+                name, name
+            ));
+        }
+    }
+
+    // (21.6): springs + bars + roll elements of both axles
+    let roll_stiffness = (suspension.front_left.spring_rate + suspension.front_right.spring_rate)
+        * geometry.front_track_width.powi(2)
+        / 4.0
+        + (suspension.rear_left.spring_rate + suspension.rear_right.spring_rate)
+            * geometry.rear_track_width.powi(2)
+            / 4.0
+        + suspension.front_anti_roll_bar_stiffness
+        + suspension.rear_anti_roll_bar_stiffness
+        + suspension.front_axle.roll_stiffness
+        + suspension.rear_axle.roll_stiffness;
+    if roll_stiffness <= 0.0 {
+        return Err(
+            "the car needs a roll stiffness > 0 N·m/rad: corner springs, anti-roll bars and \
+             roll elements are all 0"
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 fn validate_corner_suspension(name: &str, corner: &CornerSuspension) -> Result<(), String> {
-    if !corner.spring_rate.is_finite() || corner.spring_rate <= 0.0 {
+    // 0 is allowed for a decoupled axle: validate_axle_elements checks the axle has a heave rate
+    if !corner.spring_rate.is_finite() || corner.spring_rate < 0.0 {
         return Err(format!(
-            "suspension.{}.spring_rate must be > 0 N/m, got {}",
+            "suspension.{}.spring_rate must be >= 0 N/m, got {}",
             name, corner.spring_rate
         ));
     }
@@ -2112,8 +2190,38 @@ mod tests {
             ("time_step = 0", |c| c.time_step = 0.0),
             ("time_step < 0", |c| c.time_step = -0.001),
             ("front + rear != total", |c| c.car.mass.front += 10.0),
-            ("spring_rate = 0", |c| {
-                c.car.suspension.front_left.spring_rate = 0.0
+            // docs/21: one corner at 0 is fine, an axle without any heave rate is not
+            ("front axle without heave rate", |c| {
+                c.car.suspension.front_left.spring_rate = 0.0;
+                c.car.suspension.front_right.spring_rate = 0.0;
+            }),
+            ("no roll stiffness at all", |c| {
+                let suspension = &mut c.car.suspension;
+                for corner in [
+                    &mut suspension.front_left,
+                    &mut suspension.front_right,
+                    &mut suspension.rear_left,
+                    &mut suspension.rear_right,
+                ] {
+                    corner.spring_rate = 0.0;
+                }
+                suspension.front_axle.heave_stiffness = 260_000.0;
+                suspension.rear_axle.heave_stiffness = 260_000.0;
+            }),
+            ("heave_stiffness < 0", |c| {
+                c.car.suspension.front_axle.heave_stiffness = -1.0
+            }),
+            ("heave_damping NaN", |c| {
+                c.car.suspension.rear_axle.heave_damping = f64::NAN
+            }),
+            ("roll_stiffness < 0", |c| {
+                c.car.suspension.rear_axle.roll_stiffness = -1.0
+            }),
+            ("roll_damping infinite", |c| {
+                c.car.suspension.front_axle.roll_damping = f64::INFINITY
+            }),
+            ("heave element too stiff for the time step", |c| {
+                c.car.suspension.front_axle.heave_stiffness = 1e12
             }),
             ("spring_rate < 0", |c| {
                 c.car.suspension.rear_right.spring_rate = -1.0

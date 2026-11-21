@@ -223,7 +223,8 @@ pub(crate) fn calculate_axle_roll_stiffness(
 }
 
 /// Calculates the roll stiffness of both axles with the spring rates (end stops not touched)
-/// in N·m/rad (docs/19, equations 19.4 and 19.5)
+/// in N·m/rad: springs, bar and roll element (docs/19, equations 19.4 and 19.5, docs/21,
+/// equation 21.6)
 pub(crate) fn calculate_roll_stiffnesses(
     suspension: &Suspension,
     roll: &RollValues,
@@ -234,13 +235,13 @@ pub(crate) fn calculate_roll_stiffnesses(
             suspension.front_right.spring_rate,
             roll.front_track_width,
             suspension.front_anti_roll_bar_stiffness,
-        ),
+        ) + suspension.front_axle.roll_stiffness,
         rear: calculate_axle_roll_stiffness(
             suspension.rear_left.spring_rate,
             suspension.rear_right.spring_rate,
             roll.rear_track_width,
             suspension.rear_anti_roll_bar_stiffness,
-        ),
+        ) + suspension.rear_axle.roll_stiffness,
     }
 }
 
@@ -356,7 +357,8 @@ pub(crate) fn calculate_roll_natural_frequencies(
 }
 
 /// Calculates the roll damping ratio of a rigid body, dimensionless (docs/19, equation 19.25):
-/// the roll damping of the four corner dampers over the critical damping.
+/// the roll damping of the four corner dampers and the roll elements (docs/21, equation 21.7)
+/// over the critical damping.
 #[allow(dead_code)] // Only used by tests for now
 pub(crate) fn calculate_roll_damping_ratio(
     suspension: &Suspension,
@@ -368,7 +370,9 @@ pub(crate) fn calculate_roll_damping_ratio(
         / 4.0
         + (suspension.rear_left.damping + suspension.rear_right.damping)
             * roll.rear_track_width.powi(2)
-            / 4.0;
+            / 4.0
+        + suspension.front_axle.roll_damping
+        + suspension.rear_axle.roll_damping;
 
     roll_damping / (2.0 * ((stiffnesses.front + stiffnesses.rear) * roll.rigid_roll_inertia).sqrt())
 }
@@ -386,8 +390,9 @@ mod tests {
         calculate_steady_state_roll, split_axle_loads,
     };
     use crate::physics::suspension::{
-        CornerForces, CornerLoads, StaticCarValues, SuspensionState, calculate_body_accelerations,
-        calculate_corner_forces_from_state, calculate_corner_tyre_loads,
+        AxleSuspension, CornerForces, CornerLoads, StaticCarValues, SuspensionState, WheelTravel,
+        calculate_body_accelerations, calculate_corner_forces_from_state,
+        calculate_corner_tyre_loads, calculate_heave_element_force, calculate_roll_element_force,
         calculate_static_car_values, update_suspension_positions, update_suspension_velocities,
     };
     use std::f64::consts::PI;
@@ -872,5 +877,256 @@ mod tests {
         assert!((period - 2.0 * PI / 84.87).abs() < 0.0005, "{}", period);
         // The rear stays the mirror of the front: a pure twist mode
         assert!((state.roll_front + state.roll_rear).abs() < 1e-9);
+    }
+
+    /// The baseline car made fully decoupled (docs/21 section 21.6): corner springs and dampers
+    /// 0, per axle the given heave and roll elements
+    fn decoupled_car(
+        heave_stiffness: f64,
+        heave_damping: f64,
+        roll_stiffness: f64,
+        roll_damping: f64,
+    ) -> Car {
+        let mut car = roll_centre_car();
+        let suspension = &mut car.suspension;
+        for corner in [
+            &mut suspension.front_left,
+            &mut suspension.front_right,
+            &mut suspension.rear_left,
+            &mut suspension.rear_right,
+        ] {
+            corner.spring_rate = 0.0;
+            corner.damping = 0.0;
+        }
+        let axle = AxleSuspension {
+            heave_stiffness,
+            heave_damping,
+            roll_stiffness,
+            roll_damping,
+        };
+        suspension.front_axle = axle;
+        suspension.rear_axle = axle;
+        car
+    }
+
+    fn wheel(compression: f64, compression_speed: f64) -> WheelTravel {
+        WheelTravel {
+            compression,
+            compression_speed,
+        }
+    }
+
+    #[test]
+    fn test_element_forces() {
+        // docs/21 section 21.3 checks
+        let axle = AxleSuspension {
+            heave_stiffness: 260_000.0,
+            roll_stiffness: 83_200.0,
+            ..AxleSuspension::default()
+        };
+        // Both wheels 10 mm up: 1300 N on each wheel, roll element 0
+        let (left, right) = (wheel(0.010, 0.0), wheel(0.010, 0.0));
+        assert!((calculate_heave_element_force(&axle, &left, &right) - 1300.0).abs() < 1e-9);
+        assert_eq!(calculate_roll_element_force(&axle, &left, &right, 1.6), 0.0);
+        // Pure roll of 0.01 rad on 1.6 m: heave element 0, roll element 520 N, moment 832 N·m
+        let (left, right) = (wheel(-0.008, 0.0), wheel(0.008, 0.0));
+        assert_eq!(calculate_heave_element_force(&axle, &left, &right), 0.0);
+        let force = calculate_roll_element_force(&axle, &left, &right, 1.6);
+        assert!((force - 520.0).abs() < 1e-9, "{}", force);
+        assert!((force * 1.6 - 832.0).abs() < 1e-9);
+
+        // Damping uses the speeds the same way
+        let axle = AxleSuspension {
+            heave_damping: 10_000.0,
+            roll_damping: 4_500.0,
+            ..AxleSuspension::default()
+        };
+        let (left, right) = (wheel(0.0, 0.1), wheel(0.0, 0.1));
+        assert!((calculate_heave_element_force(&axle, &left, &right) - 500.0).abs() < 1e-9);
+        let (left, right) = (wheel(0.0, -0.1), wheel(0.0, 0.1));
+        let force = calculate_roll_element_force(&axle, &left, &right, 1.6);
+        assert!((force - 4_500.0 * 0.2 / 2.56).abs() < 1e-9, "{}", force);
+    }
+
+    #[test]
+    fn test_decoupled_equals_conventional() {
+        // k_heave = 2k, K_roll = k b^2 / 2, c_heave = 2c, C_roll = c b^2 / 2 per axle gives
+        // exactly the corner forces of springs k and dampers c (docs/21 section 21.10)
+        let conventional = roll_centre_car();
+        let decoupled = decoupled_car(260_000.0, 10_000.0, 166_400.0, 12_800.0);
+        let static_conventional = calculate_static_car_values(&conventional, G_ACCELERATION);
+        let static_decoupled = calculate_static_car_values(&decoupled, G_ACCELERATION);
+        let mut state_conventional = SuspensionState::default();
+        let mut state_decoupled = SuspensionState::default();
+        // Braking and cornering together, then cornering alone
+        for index in 0..1_500 {
+            let longitudinal_acceleration = if index < 500 { -10.0 } else { 0.0 };
+            state_conventional = step(
+                &conventional,
+                &static_conventional,
+                &state_conventional,
+                8.0,
+                longitudinal_acceleration,
+            );
+            state_decoupled = step(
+                &decoupled,
+                &static_decoupled,
+                &state_decoupled,
+                8.0,
+                longitudinal_acceleration,
+            );
+        }
+        assert!(state_decoupled.roll_front > 0.0);
+        for (a, b) in [
+            (state_decoupled.heave, state_conventional.heave),
+            (state_decoupled.pitch, state_conventional.pitch),
+            (state_decoupled.roll_front, state_conventional.roll_front),
+            (
+                state_decoupled.roll_rate_front,
+                state_conventional.roll_rate_front,
+            ),
+        ] {
+            assert!((a - b).abs() < 1e-9, "{} vs {}", a, b);
+        }
+        let forces_conventional = calculate_corner_forces_from_state(
+            &conventional.suspension,
+            &static_conventional,
+            &state_conventional,
+        );
+        let forces_decoupled = calculate_corner_forces_from_state(
+            &decoupled.suspension,
+            &static_decoupled,
+            &state_decoupled,
+        );
+        assert!((forces_decoupled.front_left - forces_conventional.front_left).abs() < 1e-6);
+        assert!((forces_decoupled.rear_right - forces_conventional.rear_right).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_decoupled_worked_example() {
+        // docs/21 section 21.6: half the roll stiffness, 0.51 deg, transfer still 561 N / 663 N
+        let car = decoupled_car(260_000.0, 10_000.0, 83_200.0, 4_500.0);
+        let distances = calculate_axle_distances(&car.mass, &car.geometry);
+        let roll = calculate_roll_values(&car, &distances);
+        let stiffnesses = calculate_roll_stiffnesses(&car.suspension, &roll);
+        assert_eq!(stiffnesses.front, 83_200.0);
+        let angles = calculate_steady_state_roll(&roll, &stiffnesses, 8.0);
+        assert!((angles.front - 0.008822).abs() < 1e-6, "{:?}", angles);
+        let loads = transfer(&car, 8.0);
+        assert!((loads.front - 560.65).abs() < 0.01, "{:?}", loads);
+        assert!((loads.rear - 662.59).abs() < 0.01, "{:?}", loads);
+
+        // Roll: J_phi,ra = 291 kg·m^2 with the roll centres, 23.9 rad/s and zeta 0.646 from the
+        // roll elements alone
+        assert!((roll.rigid_roll_inertia - 291.28).abs() < 0.01);
+        let frequencies = calculate_roll_natural_frequencies(&roll, &stiffnesses);
+        assert!((frequencies.slow - 23.90).abs() < 0.01, "{:?}", frequencies);
+        let zeta = calculate_roll_damping_ratio(&car.suspension, &roll, &stiffnesses);
+        assert!((zeta - 0.646).abs() < 0.001, "{}", zeta);
+
+        // A stiffer front roll element moves the balance like the front bar: 714 N / 510 N
+        let mut stiff_front = decoupled_car(260_000.0, 10_000.0, 83_200.0, 4_500.0);
+        stiff_front.suspension.front_axle.roll_stiffness = 166_400.0;
+        let loads = transfer(&stiff_front, 8.0);
+        assert!((loads.front - 713.56).abs() < 0.01, "{:?}", loads);
+        assert!((loads.rear - 509.68).abs() < 0.01, "{:?}", loads);
+        let stiffnesses = calculate_roll_stiffnesses(&stiff_front.suspension, &roll);
+        let angles = calculate_steady_state_roll(&roll, &stiffnesses, 8.0);
+        assert!(
+            (angles.front - 1468.0 / 249_600.0).abs() < 2e-6,
+            "{:?}",
+            angles
+        );
+
+        // The dynamic roll settles there too
+        check_settles_at_steady_state(&car);
+        check_settles_at_steady_state(&stiff_front);
+    }
+
+    #[test]
+    fn test_roll_element_does_nothing_in_heave_and_pitch() {
+        // Braking at -10 m/s^2 with and without roll elements gives exactly the same motion
+        let without = decoupled_car(260_000.0, 10_000.0, 0.0, 0.0);
+        let with = decoupled_car(260_000.0, 10_000.0, 200_000.0, 5_000.0);
+        let static_without = calculate_static_car_values(&without, G_ACCELERATION);
+        let static_with = calculate_static_car_values(&with, G_ACCELERATION);
+        let mut state_without = SuspensionState::default();
+        let mut state_with = SuspensionState::default();
+        for _ in 0..500 {
+            state_without = step(&without, &static_without, &state_without, 0.0, -10.0);
+            state_with = step(&with, &static_with, &state_with, 0.0, -10.0);
+        }
+        assert!(state_with.pitch > 0.0);
+        assert_eq!(state_with, state_without);
+        assert_eq!(state_with.roll_front, 0.0);
+    }
+
+    #[test]
+    fn test_heave_element_does_nothing_in_roll() {
+        // A pure roll start: the heave element never moves, so heave and pitch stay 0
+        let car = decoupled_car(260_000.0, 10_000.0, 83_200.0, 4_500.0);
+        let static_values = calculate_static_car_values(&car, G_ACCELERATION);
+        let mut state = SuspensionState {
+            roll_front: 0.01,
+            roll_rear: 0.01,
+            ..SuspensionState::default()
+        };
+        for _ in 0..500 {
+            state = step(&car, &static_values, &state, 0.0, 0.0);
+        }
+        assert_eq!(state.heave, 0.0);
+        assert_eq!(state.pitch, 0.0);
+        assert!(state.roll_front.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_decoupled_free_oscillations() {
+        // Undamped heave: period 2 pi / sqrt((k_heave,f + k_heave,r) / m) = 0.249 s (4.0 Hz).
+        // Undamped roll: period 2 pi / 23.90 rad/s, amplitude bounded.
+        let car = decoupled_car(260_000.0, 0.0, 83_200.0, 0.0);
+        let static_values = calculate_static_car_values(&car, G_ACCELERATION);
+
+        let mut state = SuspensionState {
+            heave: 0.01,
+            ..SuspensionState::default()
+        };
+        let mut crossings = Vec::new();
+        for index in 1..1_000 {
+            let next = step(&car, &static_values, &state, 0.0, 0.0);
+            if state.heave > 0.0 && next.heave <= 0.0 {
+                crossings.push(index as f64 * TIME_STEP);
+            }
+            state = next;
+            assert!(state.heave.abs() < 0.0105);
+        }
+        let expected = 2.0 * PI / (520_000.0 / car.mass.total).sqrt();
+        assert!(
+            (crossings[1] - crossings[0] - expected).abs() < 0.002,
+            "{:?} vs {}",
+            crossings,
+            expected
+        );
+
+        let mut state = SuspensionState {
+            roll_front: 0.01,
+            roll_rear: 0.01,
+            ..SuspensionState::default()
+        };
+        let mut crossings = Vec::new();
+        for index in 1..2_000 {
+            let next = step(&car, &static_values, &state, 0.0, 0.0);
+            if state.roll_front > 0.0 && next.roll_front <= 0.0 {
+                crossings.push(index as f64 * TIME_STEP);
+            }
+            state = next;
+            assert!(state.roll_front.abs() < 0.0105);
+        }
+        let expected = 2.0 * PI / 23.90;
+        assert!(
+            (crossings[1] - crossings[0] - expected).abs() < 0.002,
+            "{:?} vs {}",
+            crossings,
+            expected
+        );
     }
 }
