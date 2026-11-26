@@ -18,11 +18,11 @@ use crate::physics::track::{Track, find_track_segment};
 use crate::physics::tyres::{Tyre, calculate_axle_grip, calculate_current_tyre_friction};
 use serde::Deserialize;
 
-/// Most rounds of the braking deceleration calculation (docs/17 section 17.4). It normally
-/// settles in fewer than 10.
-const DECELERATION_MAX_ROUNDS: u32 = 100;
+/// Most halvings of the braking deceleration search (docs/17 section 17.4, docs/23). 60
+/// halvings of a range of a few hundred m/s^2 are far below the tolerance.
+const DECELERATION_MAX_ROUNDS: u32 = 60;
 
-/// The braking deceleration has settled when a round changes it by less than this, in m/s^2
+/// The braking deceleration has settled when its search range is narrower than this, in m/s^2
 const DECELERATION_TOLERANCE: f64 = 1e-9;
 
 /// Times the backward pass goes around the track. The track is a loop, so the first time
@@ -102,7 +102,10 @@ pub(crate) fn calculate_planning_tyre(tyre: &Tyre, driver: &Driver) -> Tyre {
 /// 3. the brake force for the fixed brake bias,
 /// 4. deceleration from brake force, drag and rolling resistance (17.5).
 ///
-/// Step 1 needs the deceleration of step 4, so the steps are repeated until it has settled.
+/// Step 1 needs the deceleration of step 4: the answer is the deceleration that gives itself
+/// back, a_brake = f(a_brake). It is found by halving the range it lies in (docs/23 section
+/// 23.3): repeating the steps from a_brake = 0 can jump between two values forever in a corner,
+/// where more load on the front takes grip from an inside rear tyre that is nearly unloaded.
 pub(crate) fn calculate_braking_deceleration(
     car: &Car,
     tyre: &Tyre,
@@ -124,8 +127,8 @@ pub(crate) fn calculate_braking_deceleration(
         calculate_steady_state_lateral_transfer(car, axle_distances, lateral_acceleration);
     let wheelbase = axle_distances.front + axle_distances.rear;
 
-    let mut deceleration = 0.0;
-    for _ in 0..DECELERATION_MAX_ROUNDS {
+    // f(a_brake): steps 1 to 4 for an assumed deceleration
+    let deceleration_for = |deceleration: f64| {
         // (17.4): braking moves load to the front, never more than the rear axle carries
         let load_transfer = (car.mass.total * deceleration * car.geometry.cog_height / wheelbase)
             .min(constant_speed_loads.rear);
@@ -143,15 +146,30 @@ pub(crate) fn calculate_braking_deceleration(
         let brake_force = calculate_brake_force(&axle_grip, car.brakes.front_bias);
 
         // (17.5)
-        let new_deceleration = (brake_force + drag + rolling_resistance) / car.mass.total;
-        let change = (new_deceleration - deceleration).abs();
-        deceleration = new_deceleration;
-        if change < DECELERATION_TOLERANCE {
+        (brake_force + drag + rolling_resistance) / car.mass.total
+    };
+
+    // (23.2): the answer lies where f(a) - a changes sign. f(0) >= 0, so the range starts at
+    // 0 and its top doubles until f(a) - a is no longer positive there.
+    let mut low = 0.0;
+    let mut high = deceleration_for(0.0).max(1.0);
+    while deceleration_for(high) > high && high < 1e6 {
+        low = high;
+        high *= 2.0;
+    }
+    for _ in 0..DECELERATION_MAX_ROUNDS {
+        if high - low < DECELERATION_TOLERANCE {
             break;
+        }
+        let middle = 0.5 * (low + high);
+        if deceleration_for(middle) > middle {
+            low = middle;
+        } else {
+            high = middle;
         }
     }
 
-    deceleration
+    0.5 * (low + high)
 }
 
 /// Calculates the target speed in m/s at every point of the track line: the corner speed limit,
@@ -436,6 +454,46 @@ mod tests {
         let in_corner = deceleration(&car, &tyre, 0.5 * limit, curvature);
         let on_straight = deceleration(&car, &tyre, 0.5 * limit, 0.0);
         assert!(in_corner > at_limit + 1.0 && in_corner < on_straight);
+    }
+
+    #[test]
+    fn test_braking_deceleration_settles_in_corner() {
+        // docs/23 section 23.3: on corner entry, more braking moves load from the rear to the
+        // front, and the inside rear tyre, already light from the lateral load transfer, loses
+        // grip fast. Repeating the steps from a = 0 then jumped between two values. The answer
+        // must be one deceleration that gives itself back, and change smoothly with speed.
+        let mut car = Car::default();
+        car.geometry.cog_height = 0.45;
+        car.brakes.front_bias = 0.65;
+        let tyre = Tyre::default();
+        let environment = Environment::default();
+        let axle_distances = calculate_axle_distances(&car.mass, &car.geometry);
+        let curvature = 1.0 / 10.0;
+        let limit = crate::physics::cornering::calculate_corner_speed_limit(
+            &car,
+            &tyre,
+            &environment,
+            &axle_distances,
+            curvature,
+        );
+
+        let mut previous: Option<f64> = None;
+        for step in 0..=200 {
+            let speed = limit * (0.5 + 0.5 * step as f64 / 200.0);
+            let deceleration = deceleration(&car, &tyre, speed, curvature);
+            assert!(deceleration.is_finite() && deceleration >= 0.0);
+            if let Some(previous) = previous {
+                // 0.25 % more speed changes the deceleration by far less than 0.5 m/s^2
+                assert!(
+                    (deceleration - previous).abs() < 0.5,
+                    "jump at {:.3} m/s: {} -> {}",
+                    speed,
+                    previous,
+                    deceleration
+                );
+            }
+            previous = Some(deceleration);
+        }
     }
 
     #[test]

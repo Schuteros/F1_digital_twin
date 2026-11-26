@@ -80,7 +80,7 @@ pub(crate) fn calculate_net_force_for_wanted_acceleration(
 
 /// Calculates resistive losses in Newtons, N: rolling (or breakaway) tyre friction and air drag.
 /// Brake force is not included, it is added separately in the braking branch of the net force.
-fn calculate_force_losses(
+pub(crate) fn calculate_force_losses(
     car: &Car,
     car_state: &CarState,
     axle_loads: &AxleLoads,

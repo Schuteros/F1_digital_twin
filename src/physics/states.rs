@@ -99,6 +99,11 @@ pub struct CarState {
     /// (docs/20 section 20.7). Output only, not in the run file.
     #[serde(skip)]
     pub outside_margin: bool,
+    /// Force of the brakes on the car in Newtons, N, this step: the part of the slowing-down
+    /// force that drag and rolling resistance don't give, 0 when the brakes are off (docs/23
+    /// section 23.5). Output only, not in the run file.
+    #[serde(skip)]
+    pub brake_force: f64,
 }
 
 /// Corner speed limit and target speed of a car state read from a run file, before `prepare`
@@ -132,6 +137,7 @@ impl Default for CarState {
             line_offset: 0.0,
             heading_error: 0.0,
             outside_margin: false,
+            brake_force: 0.0,
         }
     }
 }

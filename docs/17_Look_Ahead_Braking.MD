@@ -99,8 +99,9 @@ $$F_{z,f} = F_{z,f,16.6} + \frac{m \cdot a_{brake} \cdot h}{W}, \qquad F_{z,r} =
 
 $$a_{brake} = \frac{F_{brake} + F_{drag} + F_{roll}}{m} \tag{17.5.}$$
 
-Step 1 needs $a_{brake}$ and step 4 gives it, so the four steps are repeated, starting from
-$a_{brake} = 0$, until the number stops changing (a handful of rounds).
+Step 1 needs $a_{brake}$ and step 4 gives it, so $a_{brake}$ is the value that gives itself back.
+It is found by halving the range it lies in (docs/23 section 23.3). Repeating the four steps from
+$a_{brake} = 0$ settles on a straight, but can jump between values forever on corner entry.
 
 These are the same functions the simulation calls every step (`calculate_axle_grip`,
 `calculate_brake_force`, load sensitivity included). Nothing is modelled twice.

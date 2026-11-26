@@ -14,7 +14,8 @@ use crate::physics::driver::{
 };
 use crate::physics::environment::Environment;
 use crate::physics::forces::{
-    calculate_acceleration, calculate_net_force, calculate_net_force_for_wanted_acceleration,
+    calculate_acceleration, calculate_force_losses, calculate_net_force,
+    calculate_net_force_for_wanted_acceleration,
 };
 use crate::physics::integrators::euler;
 use crate::physics::line_offset::{
@@ -367,6 +368,8 @@ pub(crate) fn simulation_step(
     simulation_state.car.tyre_loads = step_loads.tyre_loads;
     simulation_state.car.acceleration =
         get_car_acceleration(simulation_config, &simulation_state.car, &step_loads);
+    simulation_state.car.brake_force =
+        calculate_brake_force_used(simulation_config, &simulation_state.car, &step_loads);
 
     // The drive for this step is decided, so count the shift timer down (docs/12 section 12.8)
     if simulation_state.car.shift_time_left > 0.0 {
@@ -707,6 +710,24 @@ pub(crate) fn get_car_acceleration(
     };
 
     calculate_acceleration(force, car.mass.total)
+}
+
+/// Calculates the force of the brakes in Newtons, N, in a step with the acceleration
+/// `car_state.acceleration` (docs/23 section 23.5): the slowing-down force m * (-a_x) minus
+/// what drag and rolling resistance give, 0 when that is not positive (throttle or coasting).
+fn calculate_brake_force_used(
+    simulation_config: &SimulationConfig,
+    car_state: &CarState,
+    step_loads: &StepLoads,
+) -> f64 {
+    let car = &simulation_config.car;
+    let losses = calculate_force_losses(
+        car,
+        car_state,
+        &step_loads.axle_loads,
+        &step_loads.aero_loads,
+    );
+    (-car.mass.total * car_state.acceleration - losses).max(0.0)
 }
 
 /// Calculates car speed given the current car state, simulation_config and acceleration of this step.
@@ -3379,6 +3400,40 @@ mod tests {
             lap_times
         );
         assert!(lap_times[0] > lap_times[1]);
+    }
+
+    #[test]
+    fn test_brake_force_output() {
+        // docs/23 section 23.5: the brake force is the part of the slowing-down force that drag
+        // and rolling resistance don't give, and 0 on the throttle
+        let simulation_config = oval_config(0.05);
+        let mut simulation_state = SimulationState::new(&simulation_config);
+        let car = &simulation_config.car;
+
+        let mut braked = false;
+        while simulation_state.lap_times.len() < 2 {
+            let step_loads = calculate_step_loads(&simulation_config, &simulation_state.car);
+            let before = simulation_state.car.clone();
+            simulation_step(&mut simulation_state, &simulation_config);
+            let state = &simulation_state.car;
+            assert!(state.brake_force >= 0.0);
+            if state.acceleration > 0.0 {
+                assert_eq!(state.brake_force, 0.0);
+            }
+            if state.brake_force > 0.0 {
+                braked = true;
+                // m a = -(brake + losses), with the losses of the step's start
+                let losses = crate::physics::forces::calculate_force_losses(
+                    car,
+                    &before,
+                    &step_loads.axle_loads,
+                    &step_loads.aero_loads,
+                );
+                let balance = car.mass.total * state.acceleration + state.brake_force + losses;
+                assert!(balance.abs() < 1e-6 * car.mass.total * 10.0, "{}", balance);
+            }
+        }
+        assert!(braked);
     }
 
     #[test]
