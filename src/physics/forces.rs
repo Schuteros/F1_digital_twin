@@ -2,10 +2,10 @@ use crate::physics::aero::AeroLoads;
 use crate::physics::braking::calculate_brake_force;
 use crate::physics::car::Car;
 use crate::physics::loads::AxleLoads;
-use crate::physics::powertrain::{Powertrain, calculate_powertrain_force};
+use crate::physics::powertrain::{calculate_powertrain_force, engine_effective_mass};
 use crate::physics::states::CarState;
 use crate::physics::tyres::{
-    AxleGrip, Tyre, calculate_current_tyre_friction, calculate_split_force_limit,
+    AxleGrip, calculate_current_tyre_friction, calculate_split_force_limit,
 };
 
 /// Calculates the net longitudinal force on the car in Newtons, N, positive forward.
@@ -32,14 +32,7 @@ pub(crate) fn calculate_net_force(
             -(force_losses + brake_force)
         }
     } else {
-        let powertrain_force = calculate_powertrain_force_tyre_traction_limited(
-            axle_grip,
-            car_state,
-            &car.powertrain,
-            &car.tyre,
-        );
-
-        let net_force = powertrain_force - force_losses;
+        let net_force = calculate_full_throttle_body_force(car, car_state, axle_grip, force_losses);
 
         // At standstill, breakaway friction can only resist motion, never push the car backwards.
         // While moving, a negative net force is real deceleration (e.g. drag above terminal speed).
@@ -103,32 +96,49 @@ fn calculate_force_losses(
     friction_loss + aero_loads.drag
 }
 
-/// Calculates powertrain force in Newtons, N, limited by the grip of the driven axles.
-/// The powertrain force is split between the axles by the drivetrain, and the first
-/// driven axle to reach its traction limit caps the total (ideal traction control).
+/// Calculates the full-throttle net force on the car body in Newtons, N, positive forward:
+/// m * a_x with a_x = min(a_engine, a_grip) (docs/22, equation 22.15).
 ///
-/// The powertrain force is the full-throttle force in the current gear (docs/12, equation 12.10),
-/// or 0 while a gear shift is in progress (docs/12 section 12.8).
-fn calculate_powertrain_force_tyre_traction_limited(
-    axle_grip: &AxleGrip,
+/// * a_engine = (eta F_k - F_loss) / m_eff (22.12): the engine force in the current gear
+///   (docs/12, equation 12.10) times the drivetrain efficiency, 0 while a gear shift is in
+///   progress (docs/12 section 12.8). m_eff is the gear's effective mass, or m_free while
+///   shifting or slipping the clutch.
+/// * a_grip = (F_grip - F_loss) / m_grip (22.14): the driven axles at their grip limit, the
+///   first driven axle to reach its limit caps the total (ideal traction control).
+///
+/// With no rotating inertia and eta = 1 this is min(F_k, F_grip) - F_loss, as before docs/22.
+/// Needs `fill_powertrain_tables`.
+fn calculate_full_throttle_body_force(
+    car: &Car,
     car_state: &CarState,
-    powertrain: &Powertrain,
-    tyre: &Tyre,
+    axle_grip: &AxleGrip,
+    force_losses: f64,
 ) -> f64 {
-    let powertrain_force = if car_state.shift_time_left > 0.0 {
+    let powertrain = &car.powertrain;
+    let shifting = car_state.shift_time_left > 0.0;
+    let drive_force = if shifting {
         0.0
     } else {
-        calculate_powertrain_force(
-            powertrain,
-            tyre.wheel_radius,
-            car_state.gear,
-            car_state.speed,
-        )
+        powertrain.drivetrain_efficiency
+            * calculate_powertrain_force(
+                powertrain,
+                car.tyre.wheel_radius,
+                car_state.gear,
+                car_state.speed,
+            )
     };
     let traction_force =
         calculate_split_force_limit(axle_grip, powertrain.drivetrain.front_share());
 
-    powertrain_force.min(traction_force)
+    // Multiplying by m / m_eff instead of dividing and multiplying keeps the result exactly
+    // min(F_k, F_grip) - F_loss when the effective masses equal m
+    let mass = car.mass.total;
+    let engine_mass = engine_effective_mass(powertrain, car_state.gear, car_state.speed, shifting);
+    let engine_limited = (drive_force - force_losses) * (mass / engine_mass);
+    let grip_limited =
+        (traction_force - force_losses) * (mass / powertrain.effective_masses.grip_limited);
+
+    engine_limited.min(grip_limited)
 }
 
 pub(crate) fn calculate_acceleration(force: f64, mass: f64) -> f64 {
@@ -142,10 +152,10 @@ pub fn calculate_normal_force(mass: f64, g_acceleration: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use crate::physics::aero::{AeroLoads, calculate_aero_loads};
+    use crate::physics::car::Car;
     use crate::physics::forces::{
-        calculate_acceleration, calculate_force_losses, calculate_net_force,
-        calculate_net_force_for_wanted_acceleration, calculate_normal_force,
-        calculate_powertrain_force_tyre_traction_limited,
+        calculate_acceleration, calculate_force_losses, calculate_full_throttle_body_force,
+        calculate_net_force, calculate_net_force_for_wanted_acceleration, calculate_normal_force,
     };
     use crate::physics::loads::AxleLoads;
     use crate::physics::powertrain::{Drivetrain, Powertrain};
@@ -187,6 +197,20 @@ mod tests {
         prepared_config().car.powertrain
     }
 
+    /// Full-throttle force with no losses: the powertrain force capped at the traction limit
+    /// when the car has no rotating inertia and eta = 1 (docs/22, equation 22.15)
+    fn full_throttle_force(
+        axle_grip: &AxleGrip,
+        car_state: &CarState,
+        powertrain: &Powertrain,
+    ) -> f64 {
+        let car = Car {
+            powertrain: powertrain.clone(),
+            ..Car::default()
+        };
+        calculate_full_throttle_body_force(&car, car_state, axle_grip, 0.0)
+    }
+
     #[test]
     fn test_calculate_powertrain_force_tyre_traction_limited() {
         let car_state = CarState {
@@ -202,13 +226,11 @@ mod tests {
             rear: 20_000.0, // Newtons (N)
         };
 
-        let powertrain_force_tyre_traction_limited =
-            calculate_powertrain_force_tyre_traction_limited(
-                &calculate_axle_grip_from_axle_loads(&tyre, &axle_loads),
-                &car_state,
-                &powertrain,
-                &tyre,
-            );
+        let powertrain_force_tyre_traction_limited = full_throttle_force(
+            &calculate_axle_grip_from_axle_loads(&tyre, &axle_loads),
+            &car_state,
+            &powertrain,
+        );
 
         // Gear 4 at 10 m/s is below its clutch lock speed (36.16 m/s), so the clutch slips:
         // powertrain force = 375 * 2.78 * 3.0 / 0.36 = 8687.5 N (docs/12, equation 12.10)
@@ -229,11 +251,10 @@ mod tests {
             ..CarState::default()
         };
 
-        let force = calculate_powertrain_force_tyre_traction_limited(
+        let force = full_throttle_force(
             &default_static_axle_grip(),
             &car_state,
             &prepared_powertrain(),
-            &Tyre::default(),
         );
 
         // No torque reaches the wheels during a shift (docs/12 section 12.8)
@@ -261,21 +282,19 @@ mod tests {
         // = 375 * 5.43 * 3.0 / 0.36 = 16968.75 N, so in every case below the tyres are the limit
 
         // RWD: 0.9 * 3000 N = 2700 N
-        let force = calculate_powertrain_force_tyre_traction_limited(
+        let force = full_throttle_force(
             &calculate_axle_grip_from_axle_loads(&tyre, &axle_loads),
             &car_state,
             &powertrain,
-            &tyre,
         );
         assert!((force - 2700.0).abs() < 1e-9, "RWD force: {}", force);
 
         // FWD: 0.9 * 5000 N = 4500 N
         powertrain.drivetrain = Drivetrain::FrontWheelDrive;
-        let force = calculate_powertrain_force_tyre_traction_limited(
+        let force = full_throttle_force(
             &calculate_axle_grip_from_axle_loads(&tyre, &axle_loads),
             &car_state,
             &powertrain,
-            &tyre,
         );
         assert!((force - 4500.0).abs() < 1e-9, "FWD force: {}", force);
 
@@ -283,11 +302,10 @@ mod tests {
         powertrain.drivetrain = Drivetrain::AllWheelDrive {
             front_torque_split: 0.6,
         };
-        let force = calculate_powertrain_force_tyre_traction_limited(
+        let force = full_throttle_force(
             &calculate_axle_grip_from_axle_loads(&tyre, &axle_loads),
             &car_state,
             &powertrain,
-            &tyre,
         );
         assert!((force - 6750.0).abs() < 1e-9, "AWD force: {}", force);
     }
@@ -521,6 +539,126 @@ mod tests {
             let expected = car.mass.total * wanted_acceleration;
             assert!(expected > full_braking_force && expected < full_throttle_force);
             assert!((net_force(wanted_acceleration) - expected).abs() < 1e-9);
+        }
+    }
+
+    /// Default config with the docs/22 section 22.10 placeholders: I_wf = 1.0 kg·m²,
+    /// I_wr = 1.2 kg·m², I_e = 0.05 kg·m², eta = 0.95
+    fn docs_22_config() -> SimulationConfig {
+        let mut simulation_config = SimulationConfig::default();
+        simulation_config.car.mass.front_wheel_inertia = 1.0;
+        simulation_config.car.mass.rear_wheel_inertia = 1.2;
+        simulation_config.car.powertrain.engine_inertia = 0.05;
+        simulation_config.car.powertrain.drivetrain_efficiency = 0.95;
+        simulation_config.prepare().unwrap();
+        simulation_config
+    }
+
+    /// Axle loads and aero loads of the default car on a straight at `speed`, downforce split
+    /// equally, no load transfer
+    fn straight_loads(simulation_config: &SimulationConfig, speed: f64) -> (AxleLoads, AeroLoads) {
+        let car = &simulation_config.car;
+        let environment = &simulation_config.environment;
+        let aero = calculate_aero_loads(&car.aero, environment.air_density, speed);
+        let axle = (car.mass.total * environment.g_acceleration + aero.downforce) / 2.0;
+        (
+            AxleLoads {
+                front: axle,
+                rear: axle,
+            },
+            aero,
+        )
+    }
+
+    #[test]
+    fn test_engine_limited_acceleration_matches_docs() {
+        // docs/22 section 22.5 worked example: 8th gear at 80 m/s
+        let simulation_config = docs_22_config();
+        let car = &simulation_config.car;
+        let car_state = CarState {
+            speed: 80.0,
+            gear: 8,
+            ..CarState::default()
+        };
+        let (axle_loads, aero_loads) = straight_loads(&simulation_config, 80.0);
+        let axle_grip = calculate_axle_grip_from_axle_loads(&car.tyre, &axle_loads);
+
+        let net_force = calculate_net_force(car, &car_state, &axle_loads, &axle_grip, &aero_loads);
+        let acceleration = calculate_acceleration(net_force, car.mass.total);
+
+        // (0.95 * 5003 N - 3219 N) / 858.9 kg = 1.79 m/s^2
+        assert!(
+            (acceleration - 1.786).abs() < 0.002,
+            "a_x = {}",
+            acceleration
+        );
+    }
+
+    #[test]
+    fn test_grip_limited_acceleration_uses_grip_mass() {
+        // 1st gear at a launch is grip-limited: only the undriven front wheels count (22.14)
+        let simulation_config = docs_22_config();
+        let car = &simulation_config.car;
+        let car_state = CarState {
+            speed: 5.0,
+            gear: 1,
+            ..CarState::default()
+        };
+        let (axle_loads, aero_loads) = straight_loads(&simulation_config, 5.0);
+        let axle_grip = calculate_axle_grip_from_axle_loads(&car.tyre, &axle_loads);
+        let losses = calculate_force_losses(car, &car_state, &axle_loads, &aero_loads);
+
+        let net_force = calculate_net_force(car, &car_state, &axle_loads, &axle_grip, &aero_loads);
+
+        let grip_mass = car.mass.total + 2.0 / (0.36 * 0.36);
+        let expected = (axle_grip.rear - losses) * car.mass.total / grip_mass;
+        assert!(
+            (net_force - expected).abs() < 1e-9 * expected,
+            "{} {}",
+            net_force,
+            expected
+        );
+    }
+
+    #[test]
+    fn test_coasting_while_shifting_uses_free_mass() {
+        // No drive during a shift: only the losses, spread over m + I_wheels / r^2 (22.16)
+        let simulation_config = docs_22_config();
+        let car = &simulation_config.car;
+        let car_state = CarState {
+            speed: 50.0,
+            gear: 5,
+            shift_time_left: 0.003,
+            ..CarState::default()
+        };
+        let (axle_loads, aero_loads) = straight_loads(&simulation_config, 50.0);
+        let axle_grip = calculate_axle_grip_from_axle_loads(&car.tyre, &axle_loads);
+        let losses = calculate_force_losses(car, &car_state, &axle_loads, &aero_loads);
+
+        let net_force = calculate_net_force(car, &car_state, &axle_loads, &axle_grip, &aero_loads);
+
+        let free_mass = car.mass.total + 4.4 / (0.36 * 0.36);
+        let expected = -losses * car.mass.total / free_mass;
+        assert!(
+            (net_force - expected).abs() < 1e-9 * losses,
+            "{} {}",
+            net_force,
+            expected
+        );
+    }
+
+    #[test]
+    fn test_docs_22_upshift_table() {
+        // docs/22 section 22.8 table, with the losses of the default car
+        let simulation_config = docs_22_config();
+        let speeds = &simulation_config.car.powertrain.upshift_speeds;
+        let expected_km_h = [103.8, 137.1, 166.3, 195.3, 222.2, 253.2, 287.5];
+        for (speed, expected) in speeds.iter().zip(expected_km_h) {
+            assert!(
+                (speed * 3.6 - expected).abs() < 0.06,
+                "{} km/h",
+                speed * 3.6
+            );
         }
     }
 }

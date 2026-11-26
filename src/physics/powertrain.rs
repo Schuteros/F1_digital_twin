@@ -5,6 +5,7 @@
 //! [Clutch Dynamics Documentation](../../docs/08_Clutch_Dynamics.MD)
 //! [Torque Curve and Shifting Documentation](../../docs/12_Torque_Curve_and_Shifting.MD)
 
+use crate::physics::car::Mass;
 use serde::Deserialize;
 use std::f64::consts::PI;
 
@@ -16,7 +17,7 @@ const UPSHIFT_SCAN_STEP: f64 = 0.01;
 const SHIFT_TIMER_TOLERANCE: f64 = 1e-9;
 
 /// Contains all the variables that define the powertrain
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Powertrain {
     /// Full-throttle torque curve as points of (engine speed in Hertz, Hz, torque in Newton
@@ -58,6 +59,36 @@ pub struct Powertrain {
     pub(crate) peak_torque: PeakTorque,
     /// Which axles the powertrain drives
     pub drivetrain: Drivetrain,
+    /// Inertia of everything that turns at crankshaft speed (I_e) in kilogram square meters,
+    /// kg·m² (docs/22 section 22.1). 0 when missing from the car file.
+    #[serde(rename = "engine_inertia_kg_m2", default)]
+    pub engine_inertia: f64,
+    /// Fraction of the engine force that reaches the contact patches (eta), dimensionless,
+    /// 0 < eta <= 1 (docs/22 section 22.4). 1 when missing from the car file.
+    #[serde(default = "default_drivetrain_efficiency")]
+    pub drivetrain_efficiency: f64,
+    /// Effective masses of the car with its rotating parts (docs/22). Empty in Default and in a
+    /// loaded config, filled by `SimulationConfig::prepare` before the simulation starts.
+    #[serde(skip)]
+    pub(crate) effective_masses: EffectiveMasses,
+}
+
+/// Drivetrain efficiency when the car file has none: no losses (docs/22 section 22.10)
+fn default_drivetrain_efficiency() -> f64 {
+    1.0
+}
+
+/// Effective masses of the car in kilograms, kg: its mass plus its rotating parts seen as
+/// mass at the contact patch (docs/22)
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct EffectiveMasses {
+    /// m_eff,k with the clutch locked, one per gear (docs/22, equation 22.6)
+    pub per_gear: Vec<f64>,
+    /// m_free while the engine is not tied to the wheels: shifting or clutch slipping
+    /// (docs/22, equation 22.16)
+    pub engine_disconnected: f64,
+    /// m_grip when the driven tyres are at their grip limit (docs/22, equation 22.13)
+    pub grip_limited: f64,
 }
 
 impl Default for Powertrain {
@@ -84,6 +115,9 @@ impl Default for Powertrain {
             clutch_lock_speeds: Vec::new(),
             peak_torque: PeakTorque::default(),
             drivetrain: Drivetrain::RearWheelDrive,
+            engine_inertia: 0.0,
+            drivetrain_efficiency: 1.0,
+            effective_masses: EffectiveMasses::default(),
         }
     }
 }
@@ -91,7 +125,7 @@ impl Default for Powertrain {
 /// Defines which axles receive the powertrain force
 // Full names are kept for readability.
 #[allow(clippy::enum_variant_names)]
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(from = "DrivetrainFile")]
 pub enum Drivetrain {
     /// All powertrain force goes to the front axle
@@ -161,13 +195,74 @@ pub(crate) struct PeakTorque {
 }
 
 /// Fills the values of the powertrain that only depend on car data, in the order they need
-/// each other: `peak_torque`, then `clutch_lock_speeds` (they use n_pk), then `upshift_speeds`
-/// (the scan starts at the clutch lock speeds and uses the powertrain force) (docs/12 section 12.10).
-/// Called by `SimulationConfig::prepare`.
-pub(crate) fn fill_powertrain_tables(powertrain: &mut Powertrain, wheel_radius: f64) {
+/// each other: `peak_torque`, then `clutch_lock_speeds` (they use n_pk), then
+/// `effective_masses` (docs/22), then `upshift_speeds` (the scan starts at the clutch lock
+/// speeds and uses the powertrain force and the effective masses) (docs/12 section 12.10,
+/// docs/22 section 22.9). Called by `SimulationConfig::prepare`.
+///
+/// `force_losses` gives drag plus rolling resistance in Newtons, N, at a speed in m/s on a
+/// straight at constant speed (docs/22 section 22.8).
+pub(crate) fn fill_powertrain_tables(
+    powertrain: &mut Powertrain,
+    wheel_radius: f64,
+    mass: &Mass,
+    force_losses: &dyn Fn(f64) -> f64,
+) {
     powertrain.peak_torque = calculate_peak_torque(powertrain);
     powertrain.clutch_lock_speeds = calculate_clutch_lock_speeds(powertrain, wheel_radius);
-    powertrain.upshift_speeds = calculate_upshift_speeds(powertrain, wheel_radius);
+    powertrain.effective_masses = calculate_effective_masses(powertrain, mass, wheel_radius);
+    powertrain.upshift_speeds = calculate_upshift_speeds(powertrain, wheel_radius, force_losses);
+}
+
+/// Calculates the effective masses of the car in kilograms, kg (docs/22):
+/// * per gear with the clutch locked, m + (I_wheels + I_e G_k^2) / r^2 (22.6),
+/// * with the engine not tied to the wheels, m + I_wheels / r^2 (22.16),
+/// * with the driven tyres at their grip limit, m + I_undriven / r^2 (22.13).
+pub(crate) fn calculate_effective_masses(
+    powertrain: &Powertrain,
+    mass: &Mass,
+    wheel_radius: f64,
+) -> EffectiveMasses {
+    let radius_squared = wheel_radius * wheel_radius;
+    let front_wheels = 2.0 * mass.front_wheel_inertia;
+    let rear_wheels = 2.0 * mass.rear_wheel_inertia;
+    let all_wheels = front_wheels + rear_wheels;
+    let undriven_wheels = match powertrain.drivetrain {
+        Drivetrain::RearWheelDrive => front_wheels,
+        Drivetrain::FrontWheelDrive => rear_wheels,
+        Drivetrain::AllWheelDrive { .. } => 0.0,
+    };
+    let top_gear = powertrain.gear_ratios.len() as u8;
+
+    EffectiveMasses {
+        per_gear: (1..=top_gear)
+            .map(|gear| {
+                let total_ratio = calculate_total_ratio(powertrain, gear);
+                mass.total
+                    + (all_wheels + powertrain.engine_inertia * total_ratio * total_ratio)
+                        / radius_squared
+            })
+            .collect(),
+        engine_disconnected: mass.total + all_wheels / radius_squared,
+        grip_limited: mass.total + undriven_wheels / radius_squared,
+    }
+}
+
+/// Effective mass in kilograms, kg, that the engine force accelerates in `gear` at `speed` in
+/// m/s (docs/22 section 22.5): m_free while `shifting` or while the clutch slips (below the
+/// clutch lock speed), otherwise m_eff,k of the gear. Needs `fill_powertrain_tables`.
+pub(crate) fn engine_effective_mass(
+    powertrain: &Powertrain,
+    gear: u8,
+    speed: f64,
+    shifting: bool,
+) -> f64 {
+    let masses = &powertrain.effective_masses;
+    if shifting || gear == 0 || speed < powertrain.clutch_lock_speeds[(gear - 1) as usize] {
+        masses.engine_disconnected
+    } else {
+        masses.per_gear[(gear - 1) as usize]
+    }
 }
 
 /// Finds the peak torque (T_pk) and its engine speed (n_pk) on the torque curve
@@ -206,24 +301,40 @@ pub(crate) fn calculate_clutch_lock_speeds(powertrain: &Powertrain, wheel_radius
 }
 
 /// Calculates the optimal upshift speed of every gear except the top gear in meters per
-/// second, m/s, by the scan in docs/12 section 12.6.
+/// second, m/s, by the scan in docs/12 section 12.6, comparing accelerations (docs/22 section 22.8).
 ///
-/// Needs `clutch_lock_speeds` filled first, the scan starts there and uses the powertrain force (12.10).
-pub(crate) fn calculate_upshift_speeds(powertrain: &Powertrain, wheel_radius: f64) -> Vec<f64> {
+/// Needs `clutch_lock_speeds` and `effective_masses` filled first, the scan starts there and
+/// uses the powertrain force (12.10). `force_losses` as in `fill_powertrain_tables`.
+pub(crate) fn calculate_upshift_speeds(
+    powertrain: &Powertrain,
+    wheel_radius: f64,
+    force_losses: &dyn Fn(f64) -> f64,
+) -> Vec<f64> {
     let top_gear = powertrain.gear_ratios.len() as u8;
 
     (1..top_gear)
-        .map(|gear| calculate_upshift_speed(powertrain, wheel_radius, gear))
+        .map(|gear| calculate_upshift_speed(powertrain, wheel_radius, gear, force_losses))
         .collect()
 }
 
 /// Scans for the upshift speed from `gear` to `gear + 1` in meters per second, m/s
-/// (docs/12 section 12.6): from the clutch lock speed of `gear` up to its limiter speed, the
-/// first speed where `gear + 1` gives at least as much force (12.11). If there is none, the
-/// limiter speed (12.13).
-fn calculate_upshift_speed(powertrain: &Powertrain, wheel_radius: f64, gear: u8) -> f64 {
+/// (docs/12 section 12.6, docs/22 section 22.8): from the clutch lock speed of `gear` up to its
+/// limiter speed, the first speed where `gear + 1` gives at least as much full-throttle
+/// acceleration, (eta F - F_loss) / m_eff (22.17). If there is none, the limiter speed (12.13).
+fn calculate_upshift_speed(
+    powertrain: &Powertrain,
+    wheel_radius: f64,
+    gear: u8,
+    force_losses: &dyn Fn(f64) -> f64,
+) -> f64 {
     let start_speed = powertrain.clutch_lock_speeds[(gear - 1) as usize];
     let limiter_speed = calculate_limiter_speed(powertrain, wheel_radius, gear);
+    let acceleration = |gear: u8, speed: f64, losses: f64| {
+        (powertrain.drivetrain_efficiency
+            * calculate_powertrain_force(powertrain, wheel_radius, gear, speed)
+            - losses)
+            / engine_effective_mass(powertrain, gear, speed, false)
+    };
 
     // Speed = start + step count * scan step, so the 0.01 m/s steps don't add up rounding error
     let mut step_count: u32 = 0;
@@ -233,9 +344,8 @@ fn calculate_upshift_speed(powertrain: &Powertrain, wheel_radius: f64, gear: u8)
             return limiter_speed;
         }
 
-        let force_current = calculate_powertrain_force(powertrain, wheel_radius, gear, speed);
-        let force_next = calculate_powertrain_force(powertrain, wheel_radius, gear + 1, speed);
-        if force_next >= force_current {
+        let losses = force_losses(speed);
+        if acceleration(gear + 1, speed, losses) >= acceleration(gear, speed, losses) {
             return speed;
         }
 
@@ -380,6 +490,7 @@ pub(crate) fn calculate_engine_torque(powertrain: &Powertrain, revs_hz: f64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::car::Car;
 
     /// Wheel radius of the default tyre in meters, m
     const WHEEL_RADIUS: f64 = 0.36;
@@ -387,7 +498,9 @@ mod tests {
     /// Default powertrain with both shift tables filled for the default 0.36 m wheel
     fn prepared_powertrain() -> Powertrain {
         let mut powertrain = Powertrain::default();
-        fill_powertrain_tables(&mut powertrain, WHEEL_RADIUS);
+        fill_powertrain_tables(&mut powertrain, WHEEL_RADIUS, &Car::default().mass, &|_| {
+            0.0
+        });
         powertrain
     }
 
@@ -518,7 +631,9 @@ mod tests {
             torque_curve: vec![(66.67, 375.0), (216.67, 375.0)],
             ..Powertrain::default()
         };
-        fill_powertrain_tables(&mut powertrain, WHEEL_RADIUS);
+        fill_powertrain_tables(&mut powertrain, WHEEL_RADIUS, &Car::default().mass, &|_| {
+            0.0
+        });
 
         assert_eq!(powertrain.upshift_speeds.len(), 7);
         for (gear_index, &speed) in powertrain.upshift_speeds.iter().enumerate() {
@@ -685,5 +800,125 @@ mod tests {
             front_torque_split: 0.35,
         };
         assert_eq!(all_wheel_drive.front_share(), 0.35);
+    }
+
+    /// Mass of the default car with the docs/22 section 22.10 placeholder wheels
+    fn docs_22_mass() -> Mass {
+        Mass {
+            front_wheel_inertia: 1.0,
+            rear_wheel_inertia: 1.2,
+            ..Car::default().mass
+        }
+    }
+
+    #[test]
+    fn test_effective_masses_match_docs() {
+        // docs/22 section 22.2: I_wheels = 4.4 kg·m², I_e = 0.05 kg·m², r = 0.36 m
+        let powertrain = Powertrain {
+            engine_inertia: 0.05,
+            ..Powertrain::default()
+        };
+        let masses = calculate_effective_masses(&powertrain, &docs_22_mass(), WHEEL_RADIUS);
+
+        // Table in docs/22 section 22.2, rounded to 0.1 kg
+        let expected = [951.8, 905.6, 887.0, 876.3, 869.6, 865.2, 861.6, 858.9];
+        assert_eq!(masses.per_gear.len(), expected.len());
+        for (gear_index, (&mass, &expected)) in masses.per_gear.iter().zip(&expected).enumerate() {
+            assert!(
+                (mass - expected).abs() < 0.05,
+                "gear {}: {} kg, expected {} kg",
+                gear_index + 1,
+                mass,
+                expected
+            );
+        }
+
+        // m_free = 815.5 + 4.4 / 0.1296 = 849.4 kg (22.16)
+        assert!((masses.engine_disconnected - (815.494393476 + 4.4 / 0.1296)).abs() < 1e-9);
+        // Rear wheel drive: only the two front wheels, 815.5 + 2.0 / 0.1296 = 830.9 kg (22.13)
+        assert!((masses.grip_limited - (815.494393476 + 2.0 / 0.1296)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_grip_limited_mass_follows_drivetrain() {
+        let mass = docs_22_mass();
+        let mut powertrain = Powertrain {
+            drivetrain: Drivetrain::FrontWheelDrive,
+            ..Powertrain::default()
+        };
+        // Front wheel drive: the two rear wheels are undriven
+        let masses = calculate_effective_masses(&powertrain, &mass, WHEEL_RADIUS);
+        assert!((masses.grip_limited - (mass.total + 2.4 / 0.1296)).abs() < 1e-9);
+
+        // All wheel drive: every wheel is driven, so m_grip = m
+        powertrain.drivetrain = Drivetrain::AllWheelDrive {
+            front_torque_split: 0.4,
+        };
+        let masses = calculate_effective_masses(&powertrain, &mass, WHEEL_RADIUS);
+        assert_eq!(masses.grip_limited, mass.total);
+    }
+
+    #[test]
+    fn test_no_rotating_parts_gives_plain_mass() {
+        let powertrain = prepared_powertrain();
+        let mass = Car::default().mass.total;
+        let masses = &powertrain.effective_masses;
+        assert!(masses.per_gear.iter().all(|&m| m == mass));
+        assert_eq!(masses.engine_disconnected, mass);
+        assert_eq!(masses.grip_limited, mass);
+    }
+
+    #[test]
+    fn test_engine_effective_mass_while_shifting_or_slipping() {
+        let mut powertrain = Powertrain {
+            engine_inertia: 0.05,
+            ..Powertrain::default()
+        };
+        fill_powertrain_tables(&mut powertrain, WHEEL_RADIUS, &docs_22_mass(), &|_| 0.0);
+        let masses = powertrain.effective_masses.clone();
+        let lock_speed = powertrain.clutch_lock_speeds[0];
+
+        // Locked: the gear's own effective mass
+        assert_eq!(
+            engine_effective_mass(&powertrain, 1, lock_speed + 1.0, false),
+            masses.per_gear[0]
+        );
+        // Clutch slipping below the lock speed, or shifting: the engine is not tied to the wheels
+        assert_eq!(
+            engine_effective_mass(&powertrain, 1, lock_speed - 1.0, false),
+            masses.engine_disconnected
+        );
+        assert_eq!(
+            engine_effective_mass(&powertrain, 1, lock_speed + 1.0, true),
+            masses.engine_disconnected
+        );
+    }
+
+    #[test]
+    fn test_rotating_inertia_moves_upshifts_earlier() {
+        // docs/22 section 22.8: the next gear has the smaller effective mass, so it wins earlier
+        let without = prepared_powertrain();
+        let mut with = Powertrain {
+            engine_inertia: 0.05,
+            drivetrain_efficiency: 0.95,
+            ..Powertrain::default()
+        };
+        fill_powertrain_tables(&mut with, WHEEL_RADIUS, &docs_22_mass(), &|_| 0.0);
+
+        for (gear_index, (&before, &after)) in without
+            .upshift_speeds
+            .iter()
+            .zip(&with.upshift_speeds)
+            .enumerate()
+        {
+            assert!(
+                after < before,
+                "shift {} -> {}: {} m/s, before {} m/s",
+                gear_index + 1,
+                gear_index + 2,
+                after,
+                before
+            );
+        }
     }
 }

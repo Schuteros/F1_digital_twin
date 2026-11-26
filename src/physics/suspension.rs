@@ -1053,6 +1053,8 @@ mod tests {
             total: 1000.0,
             rear: 600.0,
             front: 400.0,
+            front_wheel_inertia: 0.0,
+            rear_wheel_inertia: 0.0,
         };
 
         // Front: 400 kg * 9.81 m/s^2 / 2 = 1962 N, rear: 600 kg * 9.81 m/s^2 / 2 = 2943 N

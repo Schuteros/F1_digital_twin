@@ -749,7 +749,24 @@ impl SimulationConfig {
 
         self.static_values =
             calculate_static_car_values(&self.car, self.environment.g_acceleration);
-        fill_powertrain_tables(&mut self.car.powertrain, self.car.tyre.wheel_radius);
+        // The powertrain is taken out while its tables are filled from the rest of the car
+        let mut powertrain = std::mem::take(&mut self.car.powertrain);
+        // Drag plus rolling resistance on a straight at constant speed, for the upshift scan
+        // (docs/22 section 22.8)
+        let car = &self.car;
+        let environment = &self.environment;
+        let force_losses = |speed: f64| {
+            let aero_loads = calculate_aero_loads(&car.aero, environment.air_density, speed);
+            let normal_force = car.mass.total * environment.g_acceleration + aero_loads.downforce;
+            aero_loads.drag + car.tyre.mu_rolling * normal_force
+        };
+        fill_powertrain_tables(
+            &mut powertrain,
+            self.car.tyre.wheel_radius,
+            &self.car.mass,
+            &force_losses,
+        );
+        self.car.powertrain = powertrain;
         // The lap plan (docs/17): corner speed limits and braking with the planning tyre
         let planning_tyre = calculate_planning_tyre(&self.car.tyre, &self.driver);
         self.corner_speed_limits = calculate_corner_speed_limits(
@@ -804,6 +821,7 @@ impl SimulationConfig {
         }
 
         validate_powertrain(&self.car.powertrain)?;
+        validate_rotating_parts(&self.car)?;
 
         // The shift tables and the wheel force divide by the wheel radius (docs/12, equation 12.3)
         let wheel_radius = self.car.tyre.wheel_radius;
@@ -1366,6 +1384,29 @@ fn validate_corner_suspension(name: &str, corner: &CornerSuspension) -> Result<(
 }
 
 /// Checks the torque curve, rev range, gearing and shift data (docs/12 sections 12.2 and 12.9)
+/// Checks the rotating inertias and the drivetrain efficiency (docs/22 section 22.10)
+fn validate_rotating_parts(car: &Car) -> Result<(), String> {
+    for (field, inertia) in [
+        ("mass.front_wheel_inertia", car.mass.front_wheel_inertia),
+        ("mass.rear_wheel_inertia", car.mass.rear_wheel_inertia),
+        ("powertrain.engine_inertia", car.powertrain.engine_inertia),
+    ] {
+        if !inertia.is_finite() || inertia < 0.0 {
+            return Err(format!("{} must be >= 0 kg·m^2, got {}", field, inertia));
+        }
+    }
+
+    let efficiency = car.powertrain.drivetrain_efficiency;
+    if !efficiency.is_finite() || efficiency <= 0.0 || efficiency > 1.0 {
+        return Err(format!(
+            "powertrain.drivetrain_efficiency must be > 0 and <= 1, got {}",
+            efficiency
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_powertrain(powertrain: &Powertrain) -> Result<(), String> {
     let curve = &powertrain.torque_curve;
     if curve.len() < 2 {
@@ -2166,6 +2207,21 @@ mod tests {
                 c.car.geometry.rear_track_width = f64::NAN
             }),
             ("roll_inertia = 0", |c| c.car.suspension.roll_inertia = 0.0),
+            ("front wheel inertia < 0", |c| {
+                c.car.mass.front_wheel_inertia = -0.1
+            }),
+            ("rear wheel inertia NaN", |c| {
+                c.car.mass.rear_wheel_inertia = f64::NAN
+            }),
+            ("engine inertia < 0", |c| {
+                c.car.powertrain.engine_inertia = -0.01
+            }),
+            ("drivetrain efficiency = 0", |c| {
+                c.car.powertrain.drivetrain_efficiency = 0.0
+            }),
+            ("drivetrain efficiency > 1", |c| {
+                c.car.powertrain.drivetrain_efficiency = 1.05
+            }),
             ("roll centre NaN", |c| {
                 c.car.suspension.front_roll_centre_height = f64::NAN
             }),

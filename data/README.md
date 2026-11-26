@@ -134,6 +134,8 @@ and the acceleration. Writing one of them (e.g. `revs_hz`) is an unknown key err
 | `total_kg` | kg | Total mass of the car |
 | `front_kg` | kg | Mass on the front axle |
 | `rear_kg` | kg | Mass on the rear axle. `front_kg + rear_kg` must equal `total_kg` |
+| `front_wheel_inertia_kg_m2` | kg·m² | Optional, 0 when missing. Inertia of one front wheel about its axle: tyre, rim, hub, brake disc and anything else turning at wheel speed, >= 0 (docs/22) |
+| `rear_wheel_inertia_kg_m2` | kg·m² | Optional, 0 when missing. Inertia of one rear wheel, with its share of the drive shafts, differential and sprocket, >= 0 (docs/22) |
 
 `[geometry]` (docs/10, docs/19)
 
@@ -172,9 +174,17 @@ and the acceleration. Writing one of them (e.g. `revs_hz`) is an unknown key err
 | `final_drive` | | Final drive ratio between the gearbox output and the wheels, > 0 |
 | `shift_time_s` | s | Time without drive during a gear shift, >= 0 |
 | `downshift_hysteresis_m_per_s` | m/s | Downshift happens this far below the upshift speed of the gear below, >= 0 |
+| `engine_inertia_kg_m2` | kg·m² | Optional, 0 when missing. Inertia of everything turning at crankshaft speed (crank, flywheel, clutch, gearbox input), >= 0 (docs/22) |
+| `drivetrain_efficiency` | | Optional, 1 when missing. Fraction of the engine force that reaches the tyres, > 0 and <= 1 (docs/22) |
 
-The shift tables (clutch lock speeds and upshift speeds) are not in the file: they are
-calculated from the torque curve, gearing and wheel radius before the simulation starts.
+If you only have a rotating mass factor per gear (δ_k = effective mass / mass, as on many team
+sheets), docs/22 section 22.3 shows how to turn it into `engine_inertia_kg_m2` and the wheel
+inertias: (δ_k − 1)·m·r² plotted against G_k² is a straight line with slope I_e and intercept
+I_wheels (all four wheels).
+
+The shift tables (clutch lock speeds and upshift speeds) and the effective masses are not in the
+file: they are calculated from the torque curve, gearing, wheel radius, inertias and losses before
+the simulation starts.
 
 `[powertrain.drivetrain]`
 

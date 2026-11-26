@@ -320,6 +320,8 @@ mod tests {
             total: 1000.0,
             front: 400.0,
             rear: 600.0,
+            front_wheel_inertia: 0.0,
+            rear_wheel_inertia: 0.0,
         };
         let axle_distances = calculate_axle_distances(&mass, &car.geometry);
         let forces = calculate_axle_lateral_forces(mass.total, 5.0, &axle_distances);

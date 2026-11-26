@@ -70,6 +70,8 @@ mod tests {
             total: 1000.0, // kilograms (kg)
             rear: 600.0,   // kilograms (kg)
             front: 400.0,  // kilograms (kg)
+            front_wheel_inertia: 0.0,
+            rear_wheel_inertia: 0.0,
         }
     }
 
@@ -98,6 +100,8 @@ mod tests {
             total: 1000.0, // kilograms (kg)
             rear: 600.0,   // kilograms (kg)
             front: 400.0,  // kilograms (kg)
+            front_wheel_inertia: 0.0,
+            rear_wheel_inertia: 0.0,
         };
         let g_acceleration: f64 = 9.81; // meters per second squared (m/s^2)
 

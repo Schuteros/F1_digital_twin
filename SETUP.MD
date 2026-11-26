@@ -239,6 +239,33 @@ The things you will change most often in a run file:
 Every key is listed in [data/README.md](data/README.md). The files themselves have comments where a
 key needs one.
 
+**Optional car keys for spinning parts (from version 0.16.0).** Wheels and the engine have to be spun
+up when the car accelerates, so the car acts heavier, most of all in low gears (docs/22). Four keys
+in the car file describe this. Leave them out and the car has no spinning parts and no drivetrain
+losses:
+
+```toml
+[mass]
+front_wheel_inertia_kg_m2 = 1.0   # one front wheel: tyre, rim, hub, brake disc
+rear_wheel_inertia_kg_m2 = 1.2    # one rear wheel, plus its share of drive shafts, diff, sprocket
+
+[powertrain]
+engine_inertia_kg_m2 = 0.05       # everything turning at crankshaft speed
+drivetrain_efficiency = 0.95      # 1 = no losses
+```
+
+Many team sheets give a **rotating mass factor per gear** (δ, for example 1.18 / 1.11 / 1.07 / 1.06)
+instead of inertias. To turn it into these keys:
+
+1. For each gear, work out the total ratio G = primary ratio × gear ratio × final drive.
+2. Work out (δ − 1) × total mass × wheel radius² for each gear.
+3. Put G² in one spreadsheet column and the step 2 value in the next, and add a straight trend line
+   (in Excel: `=SLOPE(...)` and `=INTERCEPT(...)`).
+4. The slope is `engine_inertia_kg_m2`. The intercept is the inertia of all four wheels together:
+   divide it by 4 for each wheel key, unless you know the front and rear wheels differ.
+
+The details and a worked example are in docs/22 section 22.3.
+
 **Your own track:** make a `.csv` file with the header `x_m,y_m` and one point per line in driving
 order, about 1 m apart, without repeating the first point at the end. The details are in
 [data/README.md](data/README.md), section *Track file*. A spreadsheet can save this format with

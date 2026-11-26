@@ -339,10 +339,10 @@ Each step:
 
 ## 12.11. Left for Later
 
-* **Rotating inertia.** Effective mass $m + (I_{wheel} + I_{engine} G_k^2)/r^2$ depends on the
+* **Rotating inertia.** Done in docs/22. Effective mass $m + (I_{wheel} + I_{engine} G_k^2)/r^2$ depends on the
   gear. The shift test then compares accelerations $F_k / m_{eff,k}$ instead of forces, which
   moves upshifts slightly earlier.
-* **Drivetrain efficiency.** A factor $\eta$ in 12.3, stored as data.
+* **Drivetrain efficiency.** Done in docs/22. A factor $\eta$ in 12.3, stored as data.
 * **Part throttle.** A torque map over engine speed and throttle instead of one curve.
 * **Engine braking.** Negative torque at closed throttle. This makes downshift timing under
   braking matter.

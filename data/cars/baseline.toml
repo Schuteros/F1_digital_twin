@@ -11,6 +11,10 @@ default_tyres = "../tyres/baseline.toml"
 total_kg = 815.494393476
 front_kg = 407.747196738
 rear_kg = 407.747196738
+# Optional, 0 when missing: one wheel with its tyre, rim, hub, brake disc and anything else
+# turning at wheel speed (docs/22). Remove the # for the docs/22 placeholders.
+# front_wheel_inertia_kg_m2 = 1.0
+# rear_wheel_inertia_kg_m2 = 1.2
 
 # Chassis dimensions for load transfer and the suspension model (docs/10, docs/11, docs/19).
 # Placeholder values: verify against current F1 regulations / sources.
@@ -60,6 +64,10 @@ gear_ratios = [5.43, 4.02, 3.29, 2.78, 2.41, 2.13, 1.87, 1.65]
 final_drive = 3.0
 shift_time_s = 0.005
 downshift_hysteresis_m_per_s = 0.5
+# Optional, 0 when missing: everything turning at crankshaft speed (docs/22)
+# engine_inertia_kg_m2 = 0.05
+# Optional, 1 (no losses) when missing
+# drivetrain_efficiency = 0.95
 
 # Which axles are driven. The type is "rear_wheel_drive", "front_wheel_drive", or
 # "all_wheel_drive" together with front_torque_split (0.0..=1.0, the front share).

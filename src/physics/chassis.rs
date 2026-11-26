@@ -108,6 +108,8 @@ mod tests {
             total: 1000.0,
             rear: 600.0,
             front: 400.0,
+            front_wheel_inertia: 0.0,
+            rear_wheel_inertia: 0.0,
         };
         let geometry = ChassisGeometry {
             wheelbase: 3.0,

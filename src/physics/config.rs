@@ -779,6 +779,31 @@ mod tests {
     }
 
     #[test]
+    fn test_rotating_parts_keys() {
+        // docs/22 section 22.10: optional, no rotating inertia and eta = 1 when missing
+        let baseline = load_run(&baseline_run()).unwrap();
+        assert_eq!(baseline.car.mass.front_wheel_inertia, 0.0);
+        assert_eq!(baseline.car.mass.rear_wheel_inertia, 0.0);
+        assert_eq!(baseline.car.powertrain.engine_inertia, 0.0);
+        assert_eq!(baseline.car.powertrain.drivetrain_efficiency, 1.0);
+
+        let data = TempData::new("rotating_parts");
+        for key in [
+            "front_wheel_inertia_kg_m2",
+            "rear_wheel_inertia_kg_m2",
+            "engine_inertia_kg_m2",
+            "drivetrain_efficiency",
+        ] {
+            data.replace("cars/baseline.toml", &format!("# {}", key), key);
+        }
+        let config = load_run(&data.run()).unwrap();
+        assert_eq!(config.car.mass.front_wheel_inertia, 1.0);
+        assert_eq!(config.car.mass.rear_wheel_inertia, 1.2);
+        assert_eq!(config.car.powertrain.engine_inertia, 0.05);
+        assert_eq!(config.car.powertrain.drivetrain_efficiency, 0.95);
+    }
+
+    #[test]
     fn test_frame_and_optional_roll_keys() {
         // docs/19 section 19.12: the baseline car has a rigid frame (no [frame] table)
         let baseline = load_run(&baseline_run()).unwrap();

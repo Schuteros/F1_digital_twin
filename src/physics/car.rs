@@ -46,6 +46,8 @@ impl Default for Car {
                 total: total_mass,
                 rear: driven_axle_mass,
                 front: total_mass - driven_axle_mass,
+                front_wheel_inertia: 0.0,
+                rear_wheel_inertia: 0.0,
             },
             powertrain: Powertrain::default(),
             tyre: Tyre::default(),
@@ -71,4 +73,13 @@ pub struct Mass {
     /// Mass on the front axle in kilograms, kg
     #[serde(rename = "front_kg")]
     pub front: f64,
+    /// Inertia of one front wheel about its axle (I_wf) in kilogram square meters, kg·m²:
+    /// tyre, rim, hub, brake disc and anything else turning at wheel speed (docs/22 section
+    /// 22.1). 0 when missing from the car file.
+    #[serde(rename = "front_wheel_inertia_kg_m2", default)]
+    pub front_wheel_inertia: f64,
+    /// Inertia of one rear wheel about its axle (I_wr) in kilogram square meters, kg·m²
+    /// (docs/22 section 22.1). 0 when missing from the car file.
+    #[serde(rename = "rear_wheel_inertia_kg_m2", default)]
+    pub rear_wheel_inertia: f64,
 }
